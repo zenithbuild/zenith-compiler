@@ -1,0 +1,10 @@
+/Users/judahsullivan/Personal/zenith/zenith-compiler/native/compiler-native/target/release/deps/oxc_index-75306588202d8f4d.d: /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/lib.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/idxslice.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/indexing.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/macros.rs
+
+/Users/judahsullivan/Personal/zenith/zenith-compiler/native/compiler-native/target/release/deps/liboxc_index-75306588202d8f4d.rlib: /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/lib.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/idxslice.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/indexing.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/macros.rs
+
+/Users/judahsullivan/Personal/zenith/zenith-compiler/native/compiler-native/target/release/deps/liboxc_index-75306588202d8f4d.rmeta: /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/lib.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/idxslice.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/indexing.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/macros.rs
+
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/lib.rs:
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/idxslice.rs:
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/indexing.rs:
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_index-4.1.0/src/macros.rs:

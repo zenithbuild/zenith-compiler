@@ -1,0 +1,1 @@
+&mut oxc_ast::ast::Expression<'_>

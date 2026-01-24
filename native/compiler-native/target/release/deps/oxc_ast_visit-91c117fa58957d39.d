@@ -1,0 +1,9 @@
+/Users/judahsullivan/Personal/zenith/zenith-compiler/native/compiler-native/target/release/deps/oxc_ast_visit-91c117fa58957d39.d: /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/lib.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit_mut.rs
+
+/Users/judahsullivan/Personal/zenith/zenith-compiler/native/compiler-native/target/release/deps/liboxc_ast_visit-91c117fa58957d39.rlib: /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/lib.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit_mut.rs
+
+/Users/judahsullivan/Personal/zenith/zenith-compiler/native/compiler-native/target/release/deps/liboxc_ast_visit-91c117fa58957d39.rmeta: /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/lib.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit.rs /Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit_mut.rs
+
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/lib.rs:
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit.rs:
+/Users/judahsullivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_ast_visit-0.110.0/src/generated/visit_mut.rs:

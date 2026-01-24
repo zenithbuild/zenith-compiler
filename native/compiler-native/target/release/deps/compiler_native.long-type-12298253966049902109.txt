@@ -1,0 +1,3 @@
+std::option::Option<oxc_allocator::Box<'_, oxc_ast::ast::TSTypeParameterInstantiation<'_>>>
+std::option::Option<oxc_allocator::Box<'_, oxc_ast::ast::TSTypeParameterInstantiation<'_>>>: FromIn<'_, oxc_allocator::Vec<'_, oxc_ast::ast::Argument<'_>>>
+IntoIn<'_, std::option::Option<oxc_allocator::Box<'_, oxc_ast::ast::TSTypeParameterInstantiation<'_>>>>

@@ -1,0 +1,2 @@
+oxc_ast::ast::JSXExpression<'a>
+oxc_ast::ast::JSXExpression<'_>
