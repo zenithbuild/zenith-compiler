@@ -1,12 +1,12 @@
 {
-  "name": "@zenith/compiler-native",
+  "name": "@zenithbuild/compiler-native",
   "version": "0.1.0",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
     "name": "compiler-native",
     "package": {
-      "name": "@zenith/compiler-native"
+      "name": "@zenithbuild/compiler-native"
     }
   },
   "scripts": {

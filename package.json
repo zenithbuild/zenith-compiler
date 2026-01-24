@@ -1,5 +1,5 @@
 {
-    "name": "@zenith/compiler",
+    "name": "@zenithbuild/compiler",
     "version": "1.0.1",
     "description": "The Iron Heart: Native Compiler for the Zenith Framework",
     "main": "./dist/index.js",
@@ -22,7 +22,7 @@
         "esbuild": "^0.20.0",
         "ws": "^8.16.0",
         "rolldown": "latest",
-        "@zenith/router": "latest",
+        "@zenithbuild/router": "1.0.1",
         "acorn": "^8.15.0",
         "es-module-lexer": "^2.0.0",
         "marked": "^17.0.1",

@@ -54,12 +54,12 @@ export function generateBundleJS(pluginData?: Record<string, any>): string {
   global.__ZENITH_PLUGIN_DATA__ = ${serializedData};
   
 ${reactivityJS ? `  // ============================================
-  // Core Reactivity (Injected from @zenith/core)
+  // Core Reactivity (Injected from @zenithbuild/core)
   // ============================================
   ${reactivityJS}` : `  // Fallback: Reactivity not found`}
 
 ${lifecycleJS ? `  // ============================================
-  // Lifecycle Hooks (Injected from @zenith/core)
+  // Lifecycle Hooks (Injected from @zenithbuild/core)
   // ============================================
   ${lifecycleJS}` : `  // Fallback: Lifecycle not found`}
   

@@ -1,5 +1,5 @@
 /**
- * @zenith/core - Page Script Bundler
+ * @zenithbuild/core - Page Script Bundler
  * 
  * COMPILER-FIRST ARCHITECTURE
  * ═══════════════════════════════════════════════════════════════════════════════

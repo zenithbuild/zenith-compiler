@@ -1,10 +1,10 @@
-# @zenith/compiler 🏗️
+# @zenithbuild/compiler 🏗️
 
 The Iron Heart of the Zenith framework. High-performance native compiler and build-time architect.
 
 ## Overview
 
-@zenith/compiler owns everything related to structure, wiring, and validation. It is a coordinated companion to `@zenith/core`.
+@zenithbuild/compiler owns everything related to structure, wiring, and validation. It is a coordinated companion to `@zenithbuild/core`.
 
 ### Core Responsibilities
 - **Parsing**: Native AST parsing of `.zen` files (Rust).
@@ -17,7 +17,7 @@ The Iron Heart of the Zenith framework. High-performance native compiler and bui
 
 Zenith is built as a coordinated system. The compiler produces artifacts that the Core runtime consumes blindly.
 - **No runtime decisions**: If it can be known at compile time, the compiler decides it.
-- **Tight Coupling**: Versioned and released in lockstep with `@zenith/core`.
+- **Tight Coupling**: Versioned and released in lockstep with `@zenithbuild/core`.
 
 ## Internal Structure
 
