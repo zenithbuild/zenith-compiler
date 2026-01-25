@@ -1142,10 +1142,7 @@ fn transform_node_internal(
                 loop_context: active_loop_context,
             });
 
-            format!(
-                "<span data-zen-text=\"{}\" style=\"display: contents;\"></span>",
-                expr.id
-            )
+            format!("<!--zen:{}-->", expr.id)
         }
 
         TemplateNode::Element(el) => {

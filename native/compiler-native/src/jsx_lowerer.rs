@@ -147,12 +147,21 @@ impl<'a> JsxLowerer<'a> {
         args.push(Argument::from(props_expr));
         args.push(Argument::from(children_expr));
 
-        let callee = Expression::from(self.ast.member_expression_static(
-            SPAN,
-            self.ast.expression_identifier(SPAN, "__zenith"),
-            self.ast.identifier_name(SPAN, "h"),
-            false,
-        ));
+        let callee = Expression::from(
+            self.ast.member_expression_static(
+                SPAN,
+                self.ast
+                    .member_expression_static(
+                        SPAN,
+                        self.ast.expression_identifier(SPAN, "window"),
+                        self.ast.identifier_name(SPAN, "__zenith"),
+                        false,
+                    )
+                    .into(),
+                self.ast.identifier_name(SPAN, "h"),
+                false,
+            ),
+        );
 
         self.ast.expression_call(
             SPAN,
@@ -204,12 +213,21 @@ impl<'a> JsxLowerer<'a> {
         let mut args = self.ast.vec();
         args.push(Argument::from(children_expr));
 
-        let callee = Expression::from(self.ast.member_expression_static(
-            SPAN,
-            self.ast.expression_identifier(SPAN, "__zenith"),
-            self.ast.identifier_name(SPAN, "fragment"),
-            false,
-        ));
+        let callee = Expression::from(
+            self.ast.member_expression_static(
+                SPAN,
+                self.ast
+                    .member_expression_static(
+                        SPAN,
+                        self.ast.expression_identifier(SPAN, "window"),
+                        self.ast.identifier_name(SPAN, "__zenith"),
+                        false,
+                    )
+                    .into(),
+                self.ast.identifier_name(SPAN, "fragment"),
+                false,
+            ),
+        );
 
         self.ast.expression_call(
             SPAN,
@@ -262,6 +280,15 @@ impl<'a> VisitMut<'a> for JsxLowerer<'a> {
             Expression::JSXFragment(fragment) => {
                 let lowered = self.lower_jsx_fragment(fragment);
                 *expr = lowered;
+            }
+            Expression::ConditionalExpression(cond) => {
+                self.visit_expression(&mut cond.test);
+                self.visit_expression(&mut cond.consequent);
+                self.visit_expression(&mut cond.alternate);
+            }
+            Expression::LogicalExpression(logical) => {
+                self.visit_expression(&mut logical.left);
+                self.visit_expression(&mut logical.right);
             }
             _ => {
                 walk_expression(self, expr);

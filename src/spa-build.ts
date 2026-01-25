@@ -718,7 +718,7 @@ function generateZenPrimitivesRuntime(): string {
   // Export to window.__zenith
   // ============================================
   
-  window.__zenith = {
+  window.__zenith = Object.assign(window.__zenith || {}, {
     // Reactivity primitives
     signal: zenSignal,
     state: zenState,
@@ -733,7 +733,7 @@ function generateZenPrimitivesRuntime(): string {
     // Internal hooks for router
     triggerMount,
     triggerUnmount
-  };
+  });
   
   // Also expose with zen* prefix for direct usage
   window.zenSignal = zenSignal;

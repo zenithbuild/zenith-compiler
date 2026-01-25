@@ -8,6 +8,8 @@ import type { ZenIR, StyleIR } from './ir/types'
 import type { CompiledTemplate } from './output/types'
 import type { FinalizedOutput } from './finalize/finalizeOutput'
 import { parseZenFile } from './parseZenFile'
+import { discoverComponents } from './discovery/componentDiscovery'
+import { resolveComponentsInIR } from './transform/componentResolver'
 
 /**
  * Compile a .zen file into IR and CompiledTemplate
@@ -29,6 +31,7 @@ export async function compileZenSource(
   filePath: string,
   options?: {
     componentsDir?: string
+    components?: Map<string, any> // ComponentMetadata
   }
 ): Promise<{
   ir: ZenIR
@@ -38,13 +41,17 @@ export async function compileZenSource(
   // Parse with native bridge
   let ir = parseZenFile(filePath, source)
 
-  // Resolve components if components directory is provided
-  if (options?.componentsDir) {
-    const { discoverComponents } = require('./discovery/componentDiscovery')
-    const { resolveComponentsInIR } = require('./transform/componentResolver')
+  // Resolve components if explicitly provided OR if components directory is set
+  if (options?.components || options?.componentsDir) {
+    let components = options.components || new Map()
+
+    // If directory provided, discover and merge
+    if (options.componentsDir) {
+      const discovered = discoverComponents(options.componentsDir)
+      components = new Map([...components, ...discovered])
+    }
 
     // Component resolution may throw InvariantError — let it propagate
-    const components = discoverComponents(options.componentsDir)
     ir = resolveComponentsInIR(ir, components)
   }
 
@@ -65,6 +72,7 @@ export async function compileZenSource(
 export { parseZenFile }
 
 // Feature exports
+export { discoverComponents } from './discovery/componentDiscovery'
 export { discoverLayouts } from './discovery/layouts'
 export { processLayout } from './transform/layoutProcessor'
 export { bundlePageScript } from './bundler'

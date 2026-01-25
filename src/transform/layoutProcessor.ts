@@ -19,7 +19,7 @@ export function processLayout(
     layout: LayoutMetadata,
     props: Record<string, any> = {}
 ): string {
-    if (native && native.process_layout_native) {
+    if (native && native.processLayoutNative) {
         try {
             // Convert Map to record for native serialization
             const layoutForNative = {
@@ -29,7 +29,7 @@ export function processLayout(
                 styles: layout.styles
             };
 
-            return native.process_layout_native(
+            return native.processLayoutNative(
                 source,
                 JSON.stringify(layoutForNative),
                 JSON.stringify(props)

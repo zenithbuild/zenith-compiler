@@ -28,19 +28,46 @@ export function generateBundleJS(pluginData?: Record<string, any>): string {
 
   // Resolve core runtime paths - assumes sibling directory or relative in node_modules
   const rootDir = process.cwd()
-  const coreDistPath = path.join(rootDir, '../zenith-core/dist/runtime')
+  let coreRuntimePath = path.join(rootDir, '../zenith-core/dist/runtime')
+  if (!existsSync(coreRuntimePath)) {
+    coreRuntimePath = path.join(rootDir, '../zenith-core/core')
+  }
 
   let reactivityJS = ''
   let lifecycleJS = ''
 
   try {
-    const reactivityFile = path.join(coreDistPath, 'reactivity/index.js')
-    const lifecycleFile = path.join(coreDistPath, 'lifecycle/index.js')
+    let reactivityFile = path.join(coreRuntimePath, 'reactivity/index.js')
+    if (!existsSync(reactivityFile)) reactivityFile = path.join(coreRuntimePath, 'reactivity/index.ts')
 
-    if (existsSync(reactivityFile)) reactivityJS = readFileSync(reactivityFile, 'utf-8')
-    if (existsSync(lifecycleFile)) lifecycleJS = readFileSync(lifecycleFile, 'utf-8')
+    let lifecycleFile = path.join(coreRuntimePath, 'lifecycle/index.js')
+    if (!existsSync(lifecycleFile)) lifecycleFile = path.join(coreRuntimePath, 'lifecycle/index.ts')
+
+    if (existsSync(reactivityFile) && reactivityFile.endsWith('.js')) {
+      reactivityJS = transformExportsToGlobal(readFileSync(reactivityFile, 'utf-8'));
+    }
+    if (existsSync(lifecycleFile) && lifecycleFile.endsWith('.js')) {
+      lifecycleJS = transformExportsToGlobal(readFileSync(lifecycleFile, 'utf-8'));
+    }
   } catch (e) {
-    console.warn('[Zenith] Could not load runtime from core dist, falling back to basic support', e)
+    console.warn('[Zenith] Could not load runtime from core, falling back to internal', e)
+  }
+
+  // Fallback to internal hydration_runtime.js from native compiler source
+  // Use the compiler's own location to find the file, not process.cwd()
+  if (!reactivityJS || !lifecycleJS) {
+    // Resolve relative to this bundle-generator.ts file's location
+    // In compiled form, this will be in dist/runtime/, so we go up to find native/
+    const compilerRoot = path.resolve(path.dirname(import.meta.url.replace('file://', '')), '../../..');
+    const nativeRuntimePath = path.join(compilerRoot, 'native/compiler-native/src/hydration_runtime.js');
+    if (existsSync(nativeRuntimePath)) {
+      const nativeJS = readFileSync(nativeRuntimePath, 'utf-8');
+      // IMPORTANT: Include the FULL IIFE - do NOT strip the wrapper!
+      // The runtime has its own bootstrap guard and idempotency check.
+      // It will install primitives to window and create window.__ZENITH_RUNTIME__
+      reactivityJS = nativeJS;
+      lifecycleJS = ' '; // Ensure it doesn't trigger the "not found" message
+    }
   }
 
   return `/*!
@@ -62,6 +89,73 @@ ${lifecycleJS ? `  // ============================================
   // Lifecycle Hooks (Injected from @zenithbuild/core)
   // ============================================
   ${lifecycleJS}` : `  // Fallback: Lifecycle not found`}
+  
+  // ----------------------------------------------------------------------
+  // COMPAT: Expose internal exports as globals
+  // ----------------------------------------------------------------------
+  // The code above was stripped of "export { ... }" but assigned to internal variables.
+  // We need to map them back to global scope if they weren't attached by the code itself.
+  
+  // Reactivity primitives map (internal name -> global alias)
+  // Based on zenith-core/core/reactivity/index.ts re-exports:
+  // export { zenSignal, zenState, ... }
+  
+  // Since we stripped exports, we rely on the fact that the bundled code 
+  // defines variables like "var zenSignal = ..." or "function zenSignal...".
+  // Note: Minified code variables might be renamed (e.g., "var P=..."). 
+  // Ideally, @zenithbuild/core should export an IIFE build for this purpose.
+  // For now, we assume the code above already does "global.zenSignal = ..." 
+  // OR we rely on the Aliases section below to do the mapping if the names match.
+
+  // ============================================
+  // Lifecycle Hooks (Required for hydration)
+  // ============================================
+  // These functions are required by the runtime - define them if not injected from core
+  
+  const mountCallbacks = [];
+  const unmountCallbacks = [];
+  let isMounted = false;
+  
+  function zenOnMount(fn) {
+    if (isMounted) {
+      // Already mounted, run immediately
+      const cleanup = fn();
+      if (typeof cleanup === 'function') {
+        unmountCallbacks.push(cleanup);
+      }
+    } else {
+      mountCallbacks.push(fn);
+    }
+  }
+  
+  function zenOnUnmount(fn) {
+    unmountCallbacks.push(fn);
+  }
+  
+  // Called by hydration when page mounts
+  function triggerMount() {
+    isMounted = true;
+    for (let i = 0; i < mountCallbacks.length; i++) {
+      try {
+        const cleanup = mountCallbacks[i]();
+        if (typeof cleanup === 'function') {
+          unmountCallbacks.push(cleanup);
+        }
+      } catch(e) {
+        console.error('[Zenith] Mount callback error:', e);
+      }
+    }
+    mountCallbacks.length = 0;
+  }
+  
+  // Called by router when page unmounts
+  function triggerUnmount() {
+    isMounted = false;
+    for (let i = 0; i < unmountCallbacks.length; i++) {
+      try { unmountCallbacks[i](); } catch(e) { console.error('[Zenith] Unmount error:', e); }
+    }
+    unmountCallbacks.length = 0;
+  }
   
   // ============================================
   // Component Instance System
@@ -98,27 +192,27 @@ ${lifecycleJS ? `  // ============================================
       
       // Reactivity (uses global primitives but tracks for cleanup)
       signal: function(initial) {
-        return zenSignal(initial);
+        return global.zenSignal(initial);
       },
       state: function(initial) {
-        return zenState(initial);
+        return global.zenState(initial);
       },
       ref: function(initial) {
-        return zenRef(initial);
+        return global.zenRef(initial);
       },
       effect: function(fn) {
-        const cleanup = zenEffect(fn);
+        const cleanup = global.zenEffect(fn);
         instanceEffects.push(cleanup);
         return cleanup;
       },
       memo: function(fn) {
-        return zenMemo(fn);
+        return global.zenMemo(fn);
       },
       batch: function(fn) {
-        zenBatch(fn);
+        global.zenBatch(fn);
       },
       untrack: function(fn) {
-        return zenUntrack(fn);
+        return global.zenUntrack(fn);
       },
       
       // Lifecycle execution
@@ -379,47 +473,104 @@ ${lifecycleJS ? `  // ============================================
   /**
    * Hydrate static HTML with dynamic expressions
    */
+  /**
+   * Hydrate static HTML with dynamic expressions (Comment-based)
+   */
   function zenithHydrate(pageState, container) {
     try {
       container = container || document;
       
-      // Find all text expression placeholders
-      const textNodes = container.querySelectorAll('[data-zen-text]');
-      textNodes.forEach(el => updateNode(el, el.getAttribute('data-zen-text'), pageState));
+      // Walker to find comment nodes efficiently
+      const walker = document.createTreeWalker(
+        container, 
+        NodeFilter.SHOW_COMMENT, 
+        null, 
+        false
+      );
       
-      // Find all attribute expression placeholders
-      const attrNodes = container.querySelectorAll('[data-zen-attr-class], [data-zen-attr-style], [data-zen-attr-src], [data-zen-attr-href]');
-      attrNodes.forEach(el => {
-        const attrMatch = Array.from(el.attributes).find(a => a.name.startsWith('data-zen-attr-'));
-        if (attrMatch) updateNode(el, attrMatch.value, pageState);
-      });
-
-      // Find all loop placeholders
-      const loopNodes = container.querySelectorAll('template[data-zen-loop]');
-      loopNodes.forEach(el => updateLoopBinding(el, el.getAttribute('data-zen-loop'), pageState));
+      const exprLocationMap = new Map();
+      let node;
       
-      // Wire up event handlers
+      while(node = walker.nextNode()) {
+        const content = node.nodeValue || '';
+        if (content.startsWith('zen:expr_')) {
+          const exprId = content.replace('zen:expr_', '');
+          exprLocationMap.set(node, exprId);
+        }
+      }
+      
+      // Process expressions
+      for (const [commentNode, exprId] of exprLocationMap) {
+        updateNode(commentNode, exprId, pageState);
+      }
+      
+      // Wire up event handlers (still attribute based, usually safe)
       const eventTypes = ['click', 'change', 'input', 'submit', 'focus', 'blur', 'keyup', 'keydown'];
       eventTypes.forEach(eventType => {
         const elements = container.querySelectorAll('[data-zen-' + eventType + ']');
         elements.forEach(el => {
           const handlerName = el.getAttribute('data-zen-' + eventType);
-          if (handlerName && (global[handlerName] || getExpression(handlerName))) {
+          // Check global scope (window) or expression registry
+          if (handlerName) {
             el.addEventListener(eventType, function(e) {
-              const handler = global[handlerName] || getExpression(handlerName);
-              if (typeof handler === 'function') handler(e, el);
+               // Resolve handler at runtime to allow for late definition
+               const handler = global[handlerName] || getExpression(handlerName);
+               if (typeof handler === 'function') {
+                 handler(e, el);
+               } else {
+                 console.warn('[Zenith] Handler not found:', handlerName);
+               }
             });
           }
         });
       });
       
-      // Trigger mount (only if container is root)
+      // Trigger mount
       if (container === document || container.id === 'app' || container.tagName === 'BODY') {
         triggerMount();
       }
     } catch (e) {
       renderErrorPage(e, { activity: 'zenithHydrate' });
     }
+  }
+
+  // Update logic for comment placeholders
+  function updateNode(placeholder, exprId, pageState) {
+    const expr = getExpression(exprId);
+    if (!expr) return;
+    
+    // Store reference to current nodes for cleanup
+    let currentNodes = [];
+    
+    zenEffect(function() {
+      try {
+        const result = expr(pageState);
+        
+        // Cleanup old nodes
+        currentNodes.forEach(n => n.remove());
+        currentNodes = [];
+        
+        if (result == null || result === false) {
+           // Render nothing
+        } else if (result instanceof Node) {
+           placeholder.parentNode.insertBefore(result, placeholder);
+           currentNodes.push(result);
+        } else if (Array.isArray(result)) {
+           result.flat(Infinity).forEach(item => {
+             const n = item instanceof Node ? item : document.createTextNode(String(item));
+             placeholder.parentNode.insertBefore(n, placeholder);
+             currentNodes.push(n);
+           });
+        } else {
+           // Primitive
+           const n = document.createTextNode(String(result));
+           placeholder.parentNode.insertBefore(n, placeholder);
+           currentNodes.push(n);
+        }
+      } catch (e) {
+        renderErrorPage(e, { expressionId: exprId });
+      }
+    });
   }
   
   // ============================================
@@ -804,15 +955,15 @@ ${lifecycleJS ? `  // ============================================
   // Export to window.__zenith
   // ============================================
   
-  global.__zenith = {
-    // Reactivity primitives
-    signal: zenSignal,
-    state: zenState,
-    effect: zenEffect,
-    memo: zenMemo,
-    ref: zenRef,
-    batch: zenBatch,
-    untrack: zenUntrack,
+  global.__zenith = Object.assign(global.__zenith || {}, {
+    // Reactivity primitives (from hydration_runtime.js via global)
+    signal: global.zenSignal,
+    state: global.zenState,
+    effect: global.zenEffect,
+    memo: global.zenMemo,
+    ref: global.zenRef,
+    batch: global.zenBatch,
+    untrack: global.zenUntrack,
     // zenith:content
     defineSchema: defineSchema,
     zenCollection: zenCollection,
@@ -837,35 +988,30 @@ ${lifecycleJS ? `  // ============================================
     createInstance: createComponentInstance,
     defineComponent: defineComponent,
     instantiate: instantiateComponent
-  };
+  });
   
-  // Expose with zen* prefix for direct usage
-  global.zenSignal = zenSignal;
-  global.zenState = zenState;
-  global.zenEffect = zenEffect;
-  global.zenMemo = zenMemo;
-  global.zenRef = zenRef;
-  global.zenBatch = zenBatch;
-  global.zenUntrack = zenUntrack;
-  global.zenOnMount = zenOnMount;
-  global.zenOnUnmount = zenOnUnmount;
-  global.zenithHydrate = zenithHydrate;
+  // NOTE: zen* primitives (zenSignal, zenState, zenEffect, etc.) are already 
+  // assigned to global by hydration_runtime.js IIFE - no need to reassign here.
   
-  // Clean aliases
-  global.signal = zenSignal;
-  global.state = zenState;
-  global.effect = zenEffect;
-  global.memo = zenMemo;
-  global.ref = zenRef;
-  global.batch = zenBatch;
-  global.untrack = zenUntrack;
-  global.onMount = zenOnMount;
-  global.onUnmount = zenOnUnmount;
+  // Clean aliases (point to already-assigned globals)
+  global.signal = global.zenSignal;
+  global.state = global.zenState;
+  global.effect = global.zenEffect;
+  global.memo = global.zenMemo;
+  global.ref = global.zenRef;
+  global.batch = global.zenBatch;
+  global.untrack = global.zenUntrack;
+  global.onMount = global.zenOnMount;
+  global.onUnmount = global.zenOnUnmount;
   
   // useZenOrder hook exports
   global.createZenOrder = createZenOrder;
   global.processRawSections = processRawSections;
   global.slugify = slugify;
+  
+  // zenith:content exports
+  global.zenCollection = zenCollection;
+  global.ZenCollection = ZenCollection;
   
   // ============================================
   // SPA Router Runtime
@@ -1249,6 +1395,38 @@ ${lifecycleJS ? `  // ============================================
   
 })(typeof window !== 'undefined' ? window : this);
 `
+}
+/**
+ * Remove ESM export statements from bundled code
+ * e.g. "export { a as b, c };" -> ""
+ */
+/**
+ * Transform ESM export statements to global assignments
+ * e.g. "export { a as b, c };" -> "global.b = a; global.c = c;"
+ */
+function transformExportsToGlobal(code: string): string {
+  // Regex to capture "export { ... };" content
+  // Matches "export { a as b, c }"
+  const exportPattern = /export\s*\{\s*([^}]+)\s*\};?/g;
+
+  return code.replace(exportPattern, (match, content) => {
+    const parts = content.split(',');
+    const assignments = parts.map((part: string) => {
+      const trimmed = part.trim();
+      if (!trimmed) return '';
+
+      // Check for "a as b"
+      const asMatch = trimmed.match(/^(\S+)\s+as\s+(\S+)$/);
+      if (asMatch) {
+        return `global.${asMatch[2]} = ${asMatch[1]};`;
+      }
+
+      // Just "a"
+      return `global.${trimmed} = ${trimmed};`;
+    });
+
+    return assignments.join('\n');
+  });
 }
 
 /**

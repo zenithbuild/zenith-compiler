@@ -6,12 +6,12 @@
 use crate::jsx_lowerer::{JsxLowerer, ScriptRenamer};
 use crate::validate::{AttributeValue, ElementNode, ExpressionInput, StyleIR, TemplateNode};
 use napi_derive::napi;
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::{ast::*, AstBuilder};
 use oxc_ast_visit::VisitMut;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::{GetSpan, SourceType, SPAN};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -88,7 +88,10 @@ pub fn generate_codegen_intent() -> String {
 
 pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let allocator = Allocator::default();
-    let source_type = SourceType::default().with_jsx(true).with_typescript(true);
+    let source_type = SourceType::default()
+        .with_jsx(true)
+        .with_typescript(true)
+        .with_module(true);
 
     // 1. Replace "state " with "let " for parsing
     // Only match 'state' at statement boundaries (start, newline, semicolon, braces)
@@ -97,6 +100,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let parsable_script = state_re
         .replace_all(&input.script_content, "$1 let ")
         .to_string();
+    println!("[ZenithNative] generate_runtime_code_internal: script_content len={}, parsable_script len={}", input.script_content.len(), parsable_script.len());
 
     // 2. Extract state bindings using Regex (more robust than parsing substituted script)
     // Only match 'state' at statement boundaries to avoid comments
@@ -121,13 +125,22 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let ret = parser.parse();
 
     if !ret.errors.is_empty() {
-        println!("[ZenithNative] Parser Errors: {:?}", ret.errors);
+        println!(
+            "[ZenithNative] Parser Errors for {}: {:?}",
+            input.file_path, ret.errors
+        );
+        for err in &ret.errors {
+            println!("[ZenithNative] Error: {}", err.message);
+        }
     }
 
     println!(
         "[ZenithNative] Searching for state decls in {} statements",
         ret.program.body.len()
     );
+    if ret.program.body.is_empty() && !parsable_script.trim().is_empty() {
+        println!("[ZenithNative] WARNING: Parser returned 0 statements for non-empty script!");
+    }
     let mut found_bindings = HashSet::new();
     for stmt in &ret.program.body {
         if let Statement::VariableDeclaration(var_decl) = stmt {
@@ -140,12 +153,30 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                         name, in_bindings
                     );
                     if in_bindings {
-                        println!("[ZenithNative] State decl '{}'", name);
                         found_bindings.insert(name.clone());
-                        state_decls.push(StateDeclaration {
-                            name: name.clone(),
-                            initial_value: "undefined".to_string(),
-                        });
+
+                        if let Some(init) = &decl.init {
+                            let span = init.span();
+                            let init_code =
+                                &parsable_script[span.start as usize..span.end as usize];
+                            println!(
+                                "[ZenithNative] AST extracted state init for '{}': {}",
+                                name, init_code
+                            );
+                            state_decls.push(StateDeclaration {
+                                name: name.clone(),
+                                initial_value: init_code.to_string(),
+                            });
+                        } else {
+                            println!(
+                                "[ZenithNative] State '{}' has no init in AST, using undefined",
+                                name
+                            );
+                            state_decls.push(StateDeclaration {
+                                name: name.clone(),
+                                initial_value: "undefined".to_string(),
+                            });
+                        }
                     }
                 }
             }
@@ -160,8 +191,11 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
             let pattern = format!(r"(?:state|let)\s+{}\s*=\s*([^;]+)", regex::escape(binding));
             if let Ok(re) = Regex::new(&pattern) {
                 if let Some(cap) = re.captures(&input.script_content) {
-                    let initial_value = "undefined".to_string();
-                    println!("[ZenithNative] Regex fallback: '{}'", binding);
+                    let initial_value = cap[1].trim().to_string();
+                    println!(
+                        "[ZenithNative] Regex fallback for state '{}' = {}",
+                        binding, initial_value
+                    );
                     state_decls.push(StateDeclaration {
                         name: binding.clone(),
                         initial_value,
@@ -192,10 +226,29 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let mut import_lines = Vec::new();
     let mut seen_imports = HashSet::new();
     let mut script_imports = Vec::new();
+    let mut imported_identifiers = HashSet::new();
+    let mut script_locals = HashSet::new();
 
     for stmt in program.body.into_iter() {
         if let Statement::ImportDeclaration(mut import_decl) = stmt {
-            // Fix .zen extensions here too
+            // Collect imported identifiers to prevent renaming them as state
+            if let Some(specifiers) = &import_decl.specifiers {
+                for specifier in specifiers {
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            imported_identifiers.insert(s.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                            imported_identifiers.insert(s.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                            imported_identifiers.insert(s.local.name.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Fix .zen extensions
             let source = import_decl.source.value.to_string();
             let final_source = if source.ends_with(".zen") {
                 source.replace(".zen", ".js")
@@ -235,7 +288,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 import_lines.push(import_code);
 
                 // Extract specifiers using regex from the generated import_code
-                // This is more robust than manual extraction for now
                 let spec_re = Regex::new(r"import\s+(.*?)\s+from").unwrap();
                 let specifiers = if let Some(cap) = spec_re.captures(&trimmed_import) {
                     cap.get(1)
@@ -244,7 +296,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                     "".to_string()
                 };
 
-                // Collect structured import for the bridge
                 script_imports.push(ScriptImport {
                     source: source_for_struct,
                     specifiers,
@@ -253,33 +304,137 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 });
             }
         } else {
+            if let Statement::VariableDeclaration(decl) = &stmt {
+                for d in &decl.declarations {
+                    if let BindingPattern::BindingIdentifier(id) = &d.id {
+                        let name = id.name.to_string();
+                        // Only add to locals if NOT a state binding
+                        if !bindings.contains(&name) {
+                            script_locals.insert(name);
+                        }
+                    }
+                }
+            } else if let Statement::FunctionDeclaration(decl) = &stmt {
+                if let Some(id) = &decl.id {
+                    script_locals.insert(id.name.to_string());
+                }
+            }
             body.push(stmt);
         }
     }
     program.body = body;
 
+    // --- ZENITH LAW: ENVIRONMENT RESOLUTION ---
+    // Scan for zenRoute() calls and hoist them into a Prelude.
+    // Enforce ZEN_ENV_TDZ_VIOLATION if used improperly.
+    // MUST run before renamer to ensure we catch original identifiers.
+    let mut environment_prelude: Vec<String> = Vec::new();
+    let mut script_body_no_env = ast.vec();
+
+    // Validator for Law: Environment Resolution
+    struct TdzValidator {
+        found_invalid: bool,
+    }
+
+    impl<'a> oxc_ast_visit::Visit<'a> for TdzValidator {
+        fn visit_call_expression(&mut self, expr: &oxc_ast::ast::CallExpression<'a>) {
+            if let oxc_ast::ast::Expression::Identifier(ident) = &expr.callee {
+                if ident.name == "zenRoute" {
+                    self.found_invalid = true;
+                }
+            }
+            oxc_ast_visit::walk::walk_call_expression(self, expr);
+        }
+    }
+
+    for stmt in program.body.into_iter() {
+        let mut is_env_call = false;
+        if let Statement::VariableDeclaration(var_decl) = &stmt {
+            for decl in &var_decl.declarations {
+                if let Some(Expression::CallExpression(call)) = &decl.init {
+                    if let Expression::Identifier(ident) = &call.callee {
+                        if ident.name == "zenRoute" {
+                            println!(
+                                "[ZenithNative] Environment Resolution: Hoisting zenRoute call"
+                            );
+                            is_env_call = true;
+                            // Extract the full declaration for hoisting
+                            let env_code = Codegen::new()
+                                .build(&Program {
+                                    span: SPAN,
+                                    source_type,
+                                    hashbang: None,
+                                    directives: ast.vec(),
+                                    body: {
+                                        let mut b = ast.vec();
+                                        b.push(stmt.clone_in(&allocator));
+                                        b
+                                    },
+                                    source_text: "",
+                                    comments: ast.vec(),
+                                    scope_id: std::cell::Cell::new(None),
+                                })
+                                .code;
+                            environment_prelude.push(env_code.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if !is_env_call {
+            let mut validator = TdzValidator {
+                found_invalid: false,
+            };
+            oxc_ast_visit::Visit::visit_statement(&mut validator, &stmt);
+            if validator.found_invalid {
+                panic!("\n\nZenith Compile Error [ZEN_ENV_TDZ_VIOLATION]:\nEnvironment-derived values must be resolved before state and expressions.\nMove zenRoute() to the top-level environment prelude.\n\n");
+            }
+            script_body_no_env.push(stmt);
+        }
+    }
+    program.body = script_body_no_env;
+
     println!(
         "[ZenithNative] Script transformation start for {}...",
         input.file_path
     );
-    let mut renamer = ScriptRenamer::new(&allocator, bindings.clone());
+    println!(
+        "[ZenithNative] Imported identifiers to protect: {:?}",
+        imported_identifiers
+    );
+    let mut renamer =
+        ScriptRenamer::with_locals(&allocator, bindings.clone(), imported_identifiers.clone());
     renamer.visit_program(&mut program);
     println!("[ZenithNative] Script transformation end.");
     let script_no_imports = Codegen::new().build(&program).code;
+    println!(
+        "[ZenithNative] script_no_imports len={}, imports count={}",
+        script_no_imports.len(),
+        script_imports.len()
+    );
 
     let all_imports = import_lines.join("");
 
     // 4. Prepare state variables set for expression transformation
+    // Include both regex-extracted bindings AND AST-extracted state_decls names
     let mut state_vars = bindings.clone();
+    for sd in &state_decls {
+        state_vars.insert(sd.name.clone());
+    }
     state_vars.insert("props".to_string());
     state_vars.insert("stores".to_string());
     state_vars.insert("loaderData".to_string());
+    println!(
+        "[ZenithNative] state_vars for expressions: {:?}",
+        state_vars
+    );
 
     let loop_vars: HashSet<String> = input.template_bindings.iter().cloned().collect();
 
     // 5. Generate Template IR
     let template_ir = if input.nodes.is_empty() {
-        "__zenith.fragment([])".to_string()
+        "window.__zenith.fragment([])".to_string()
     } else if input.nodes.len() == 1 {
         generate_template_ir(&input.nodes[0], &input.expressions)
     } else {
@@ -288,7 +443,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
             .iter()
             .map(|n| generate_template_ir(n, &input.expressions))
             .collect();
-        format!("__zenith.fragment([{}])", child_irs.join(", "))
+        format!("window.__zenith.fragment([{}])", child_irs.join(", "))
     };
 
     let render_fn = format!(
@@ -301,8 +456,15 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         .expressions
         .iter()
         .map(|expr| {
+            let mut all_locals: HashSet<String> = loop_vars.clone();
+            for local in &script_locals {
+                all_locals.insert(local.clone());
+            }
+            for imp in &imported_identifiers {
+                all_locals.insert(imp.clone());
+            }
             let (transformed_code, _deps, uses_loop) =
-                compute_expression_intent(expr, &state_vars, &loop_vars);
+                compute_expression_intent(expr, &state_vars, &all_locals);
 
             let args = if uses_loop {
                 "state, item, index, array, globalState"
@@ -315,7 +477,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 "function {}({}) {{
   try {{
     const v = ({});
-    return (v && typeof v === 'function' && v._isSignal) ? v() : v;
+    return (v && typeof v === 'function' && v._isSignal) ? v() : (v === undefined ? '' : (Number.isNaN(v) ? 0 : v));
   }} catch (e) {{
     console.error('[Zenith Runtime] Expression {} failed:', e);
     return '';
@@ -378,8 +540,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         .collect();
 
     let reactive_state_init = format!(
-        "const state = typeof zenState === 'function' ? zenState({{\n{}\n}}) : {{\n{}\n}};",
-        state_props.join(",\n"),
+        "const state = __ZENITH_RUNTIME__.zenState({{\n{}\n}});\n  const __defaultState = state;",
         state_props.join(",\n")
     );
 
@@ -388,9 +549,86 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
 
     // 11. Bundle construction
     let bundle = format!(
-        "{}\n// [ZENITH-NATIVE] Rust Compiler Authority Bundle\n\n(function() {{\n  if (typeof window === 'undefined') return;\n\n  // 1. Zenith Runtime\n  {}\n\n  // 2. Component instance\n  const __instance = {{ mountHooks: [] }};\n  if (window.__zenith && window.__zenith.setActiveInstance) {{\n    window.__zenith.setActiveInstance(__instance);\n  }}\n\n  // 3. Reactive state\n  {}\n\n  // 4. User script\n  {}\n\n  // 5. Expressions\n  {}\n  {}\n\n  // 6. Styles injection\n  const __styles = `{}`;\n  if (__styles && typeof document !== 'undefined') {{\n    const styleTag = document.createElement('style');\n    styleTag.textContent = __styles;\n    document.head.appendChild(styleTag);\n  }}\n\n  // 7. Template IR\n  const canonicalIR = (state) => {{\n    return {};\n  }};\n  window.canonicalIR = canonicalIR;\n\n  // 8. Hydration\n  function initHydration() {{\n    if (typeof window.zenithHydrate === 'function') {{\n      window.zenithHydrate(state, document);\n    }}\n    if (window.__zenith && window.__zenith.triggerMount) {{\n      window.__zenith.triggerMount(__instance);\n    }}\n  }}\n\n  if (document.readyState === 'loading') {{\n    document.addEventListener('DOMContentLoaded', initHydration);\n  }} else {{\n    initHydration();\n  }}\n}})();\n",
+        r#"
+{}
+// [ZENITH-NATIVE] Rust Compiler Authority Bundle
+
+if (typeof window !== 'undefined') {{
+  // 1. Zenith Runtime
+  {}
+
+  // 2. Runtime Accessors & Aliases
+  const {{ 
+    zenSignal, zenState, zenEffect, zenMemo, zenRef, zenOnMount, zenOnUnmount, zenBatch, zenUntrack 
+  }} = window.__ZENITH_RUNTIME__;
+  const __zenith = window.__zenith;
+  
+  // Zenith standard aliases
+  const ref = zenSignal;
+  const reactive = zenState;
+  const effect = zenEffect;
+  const memo = zenMemo;
+  const onMount = zenOnMount;
+
+  // 3. Component instance
+  const __instance = {{ mountHooks: [] }};
+  if (window.__zenith && window.__zenith.setActiveInstance) {{
+    window.__zenith.setActiveInstance(__instance);
+  }}
+
+  // 4. Environment Prelude (hoisted zenRoute calls)
+  {}
+
+  // 5. Reactive state
+  {}
+
+  // 6. User script (Flattened for scope visibility)
+  {}
+
+  // 7. Expressions
+  {}
+  {}
+
+  // 8. Styles injection
+  const __styles = `{}`.replace(/`/g, '\\\\`');
+  if (__styles && typeof document !== 'undefined') {{
+    const styleTag = document.head.querySelector('style[data-zen-styles]') || document.createElement('style');
+    styleTag.textContent = (styleTag.textContent || '') + __styles;
+    if (!styleTag.parentNode) document.head.appendChild(styleTag);
+  }}
+
+  // 9. Template IR
+  const canonicalIR = (s) => {{
+    const state = s || __defaultState;
+    return {};
+  }};
+  window.canonicalIR = canonicalIR;
+
+  // 10. Hydration
+  function initHydration() {{
+    if (typeof window.zenithHydrate === 'function') {{
+      window.zenithHydrate(state, document);
+    }}
+    if (window.__zenith && window.__zenith.triggerMount) {{
+      window.__zenith.triggerMount(__instance);
+    }}
+  }}
+
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', initHydration);
+  }} else {{
+    initHydration();
+  }}
+}}
+"#,
         all_imports,
         hydration,
+        format!(
+            "// === ZENITH ENVIRONMENT PRELUDE ===\n{}",
+            environment_prelude
+                .join("\n")
+                .replace("zenRoute(", "__ZENITH_RUNTIME__.zenRoute(")
+        ),
         reactive_state_init,
         script_no_imports,
         expressions_code,
@@ -602,32 +840,28 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
                 }
                 _ => {
                     // Standard attribute handling
+                    let mut p_name = attr.name.clone();
                     let val = match &attr.value {
-                        AttributeValue::Static(s) => format!("\"{}\"", escape_js_string(s)),
+                        AttributeValue::Static(s) => {
+                            // If it's a standard event handler, wrap it as a function call
+                            if p_name.starts_with("on") && p_name.len() > 2 {
+                                format!("() => {}()", s)
+                            } else {
+                                format!("\"{}\"", escape_js_string(s))
+                            }
+                        }
                         AttributeValue::Dynamic(expr) => {
                             format!("() => (_expr_{}({}))", expr.id, args)
                         }
                     };
-                    (attr.name.clone(), val)
+                    (p_name, val)
                 }
             };
             Some(format!("\"{}\": {}", prop_name, prop_val))
         })
         .collect();
 
-    if el.tag == "html" || el.tag == "body" {
-        let child_irs: Vec<String> = el
-            .children
-            .iter()
-            .map(|c| generate_template_ir(c, expressions))
-            .collect();
-        return format!("__zenith.fragment([{}])", child_irs.join(", "));
-    }
-
-    if el.tag == "head" {
-        return "\"\"".to_string();
-    }
-
+    // For structural elements, we still use __zenith.h but they are handled specially by the runtime hydration
     let props_str = if props.is_empty() {
         "null".to_string()
     } else {
@@ -642,7 +876,7 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
     let children_str = format!("[{}]", children.join(", "));
 
     format!(
-        "__zenith.h(\"{}\", {}, {})",
+        "window.__zenith.h(\"{}\", {}, {})",
         el.tag, props_str, children_str
     )
 }
@@ -678,11 +912,16 @@ fn compute_expression_intent(
     jsx_lowerer.visit_program(&mut program);
 
     // 2. Rename identifiers (state.count, local vars)
-    let mut locals: HashSet<String> = if let Some(lc) = &expr.loop_context {
-        lc.variables.iter().cloned().collect()
-    } else {
-        HashSet::new()
-    };
+    let mut locals: HashSet<String> = HashSet::new();
+
+    // Add loop variables from context (e.g., item, index)
+    if let Some(lc) = &expr.loop_context {
+        for v in &lc.variables {
+            locals.insert(v.clone());
+        }
+    }
+
+    // Add known loop vars from the loop_vars set (passed from parent)
     for v in loop_vars {
         locals.insert(v.clone());
     }

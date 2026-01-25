@@ -41,6 +41,10 @@ export function parseZenFile(filePath: string, sourceInput?: string): ZenIR {
     }
 
     if (native && native.parseTemplateNative && native.parseScriptNative && native.extractStylesNative) {
+        console.log(`[ZenithDebug] parseZenFile: filePath=${filePath}, sourceLen=${source.length}`);
+        if (filePath.endsWith('index.zen')) {
+            console.log(`[ZenithDebug] source snippet: ${source.substring(0, 500)}`);
+        }
         try {
             const template = native.parseTemplateNative(source, filePath)
             const script = native.parseScriptNative(source)

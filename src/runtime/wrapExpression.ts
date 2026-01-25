@@ -50,7 +50,7 @@ export function wrapExpression(
     try {
       // Expose zenith helpers for JSX and content
       const __zenith = window.__zenith || {};
-      const zenCollection = __zenith.zenCollection || ((name) => ({ get: () => [] }));
+      const zenCollection = (window.__ZENITH_RUNTIME__ && window.__ZENITH_RUNTIME__.zenCollection) || __zenith.zenCollection || ((name) => ({ get: () => [] }));
       
       with (state) {
         return ${transformedCode};

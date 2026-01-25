@@ -1,6 +1,6 @@
 {
     "name": "@zenithbuild/compiler",
-    "version": "1.0.1",
+    "version": "1.0.12",
     "description": "The Iron Heart: Native Compiler for the Zenith Framework",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -12,17 +12,23 @@
     },
     "files": [
         "dist",
-        "native"
+        "native/compiler-native/index.js",
+        "native/compiler-native/index.d.ts",
+        "native/compiler-native/package.json",
+        "native/compiler-native/compiler-native.node"
     ],
+    "publishConfig": {
+        "access": "public"
+    },
     "scripts": {
-        "build": "tsc && cd native/compiler-native && npm run build",
+        "build": "tsc --skipLibCheck && cd native/compiler-native && bun run build",
         "test": "bun test"
     },
     "dependencies": {
         "esbuild": "^0.20.0",
         "ws": "^8.16.0",
         "rolldown": "latest",
-        "@zenithbuild/router": "1.0.1",
+        "@zenithbuild/router": "latest",
         "acorn": "^8.15.0",
         "es-module-lexer": "^2.0.0",
         "marked": "^17.0.1",

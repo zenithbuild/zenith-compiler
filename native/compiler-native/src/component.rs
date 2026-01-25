@@ -116,19 +116,7 @@ pub fn resolve_components_native(ir_json: String, components_json: String) -> St
     // Append collected expressions
     ir.template.expressions.extend(ctx.collected_expressions);
 
-    // Update script
-    if let Some(script) = &mut ir.script {
-        script.raw = ctx.merged_script;
-    } else if !ctx.merged_script.is_empty() {
-        // Create script if none exists but we have merged content
-        // Note: ScriptIR isn't fully defined in component.rs, using generic structure or need to import?
-        // Using existing ir.script structure or creating one.
-        // ir.script is Option<ScriptIR>.
-        // Need ScriptIR definition. It is in validate.rs but not public?
-        // It is defined in validate.rs as struct ScriptIR.
-    }
-
-    // Collect styles
+    // Collect styles from components
     let mut component_styles = Vec::new();
     for name in &ctx.used_components {
         if let Some(comp) = ctx.components.get(name) {
@@ -138,6 +126,16 @@ pub fn resolve_components_native(ir_json: String, components_json: String) -> St
         }
     }
     ir.styles.extend(component_styles);
+
+    // Update script - handle pages with no script initial tag
+    if let Some(script) = &mut ir.script {
+        script.raw = ctx.merged_script;
+    } else if !ctx.merged_script.is_empty() {
+        ir.script = Some(crate::validate::ScriptIR {
+            raw: ctx.merged_script,
+            attributes: HashMap::new(),
+        });
+    }
 
     serde_json::to_string(&ir).expect("Failed to serialize IR")
 }
@@ -181,19 +179,27 @@ fn resolve_component_node(
     ctx: &mut ResolutionContext,
     depth: u32,
 ) -> Vec<TemplateNode> {
-    let name = node.name.clone();
+    let mut name = node.name.clone();
 
-    // Invariants check
+    // Invariants check: try exact match first, then case-insensitive
     if !ctx.components.contains_key(&name) {
-        // For now, treat as unresolved or panic?
-        // JS version throws INV003 or INV010.
-        // We will stick to skipping for now, validation happens layer?
-        // Actually validation happens AFTER resolution in the previous flow?
-        // No, resolveComponentsInIR throws assertComponentPrecompiled.
-        // So we should potentially error here or return as is?
-        // Let's print warning and return node as is for now, or assume precompiled.
-        // Returning as ComponentNode will trigger INV003 later.
-        return vec![TemplateNode::Component(node)];
+        let lower_name = name.to_lowercase();
+        let mut found = false;
+        for (comp_name, _) in &ctx.components {
+            if comp_name.to_lowercase() == lower_name {
+                name = comp_name.clone();
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            // BUG FIX: If the component isn't in the registry (e.g. it's a Layout tag),
+            // we MUST still resolve its children, otherwise the page content is lost.
+            let mut unresolved_node = node.clone();
+            unresolved_node.children = resolve_nodes(node.children, ctx, depth + 1);
+            return vec![TemplateNode::Component(unresolved_node)];
+        }
     }
 
     ctx.used_components.insert(name.clone());
@@ -617,7 +623,10 @@ pub fn rename_symbols_safe(code: &str, rename_map: &HashMap<String, String>) -> 
     let used_state_preprocessing = parsable_code != code;
 
     let allocator = Allocator::default();
-    let source_type = SourceType::default().with_module(true);
+    let source_type = SourceType::default()
+        .with_module(true)
+        .with_typescript(true)
+        .with_jsx(true);
     let ret = Parser::new(&allocator, &parsable_code, source_type).parse();
 
     if !ret.errors.is_empty() {
@@ -665,7 +674,10 @@ fn get_local_declarations(script: &str) -> HashSet<String> {
     );
 
     let allocator = Allocator::default();
-    let source_type = SourceType::default().with_module(true);
+    let source_type = SourceType::default()
+        .with_module(true)
+        .with_typescript(true)
+        .with_jsx(true);
     let ret = Parser::new(&allocator, &parsable_script, source_type).parse();
 
     let mut symbols = HashSet::new();

@@ -349,6 +349,25 @@ fn strip_blocks(html: &str) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Check if a tag name represents a component (starts with uppercase)
+/// Pre-pass to mark component tags (uppercase) with a data attribute to preserve casing
+/// because html5ever lowercases all tag names.
+fn mark_component_tags(html: &str) -> String {
+    lazy_static! {
+        static ref TAG_OPEN_RE: Regex = Regex::new(r"<([A-Z][a-zA-Z0-9.]+)(\s|>)").unwrap();
+        // Closing tags: </HeroSection>
+        static ref TAG_CLOSE_RE: Regex = Regex::new(r"</([A-Z][a-zA-Z0-9.]*)>").unwrap();
+    }
+
+    let marked = TAG_OPEN_RE.replace_all(html, |caps: &regex::Captures| {
+        let name = &caps[1];
+        let sep = &caps[2];
+        format!("<{} data-zen-orig-name=\"{}\"{}", name, name, sep)
+    });
+
+    TAG_CLOSE_RE.replace_all(&marked, "</$1>").to_string()
+}
+
+/// Check if a tag name represents a component (starts with uppercase)
 pub fn is_component_tag(tag_name: &str) -> bool {
     tag_name
         .chars()
@@ -364,7 +383,7 @@ fn parse_dom_node(
     normalized_exprs: &HashMap<String, String>,
     parent_loop_context: Option<&LoopContext>,
     _file_path: &str,
-) -> Option<TemplateNode> {
+) -> Vec<TemplateNode> {
     let node = handle;
 
     match &node.data {
@@ -373,83 +392,47 @@ fn parse_dom_node(
             let children = node.children.borrow();
             let mut nodes = Vec::new();
             for child in children.iter() {
-                if let Some(node) = parse_dom_node(
+                nodes.extend(parse_dom_node(
                     child,
                     expressions,
                     normalized_exprs,
                     parent_loop_context,
                     _file_path,
-                ) {
-                    nodes.push(node);
-                }
+                ));
             }
-            // Return first meaningful node or None
-            nodes.into_iter().next()
+            nodes
         }
 
         NodeData::Doctype {
             name,
             public_id,
             system_id,
-        } => Some(TemplateNode::Doctype(DoctypeNode {
+        } => vec![TemplateNode::Doctype(DoctypeNode {
             name: name.to_string(),
             public_id: public_id.to_string(),
             system_id: system_id.to_string(),
             location: SourceLocation { line: 1, column: 1 },
-        })),
+        })],
 
         NodeData::Text { contents } => {
             let text = contents.borrow().to_string();
 
-            // Check for expression placeholders
-            if let Some(caps) = EXPR_PLACEHOLDER_RE.captures(&text) {
-                let placeholder = caps.get(0).unwrap().as_str();
-                if let Some(expr_code) = normalized_exprs.get(placeholder) {
-                    let expr_id = generate_expression_id();
-                    expressions.push(ExpressionIR {
-                        id: expr_id.clone(),
-                        code: expr_code.clone(),
-                        location: SourceLocation { line: 1, column: 1 },
-                        loop_context: parent_loop_context.cloned(),
-                    });
-                    return Some(TemplateNode::Expression(ExpressionNode {
-                        expression: expr_id,
-                        location: SourceLocation { line: 1, column: 1 },
-                        loop_context: parent_loop_context.cloned(),
-                    }));
-                }
-            }
-
-            // Process text that may contain multiple expressions
-            let processed = process_text_with_expressions(
-                &text,
-                expressions,
-                normalized_exprs,
-                parent_loop_context,
-            );
-            if processed.len() == 1 {
-                return processed.into_iter().next();
-            } else if !processed.is_empty() {
-                // Multiple nodes - wrap in a fragment-like structure
-                // For now, return first meaningful one
-                return processed.into_iter().next();
-            }
-
-            // Plain text
-            if !text.trim().is_empty() {
-                Some(TemplateNode::Text(TextNode {
-                    value: text,
-                    location: SourceLocation { line: 1, column: 1 },
-                    loop_context: parent_loop_context.cloned(),
-                }))
-            } else {
-                None
-            }
+            // Process text that may contain multiple expressions.
+            // process_text_with_expressions handles plain text, single expressions, and mixed content.
+            process_text_with_expressions(&text, expressions, normalized_exprs, parent_loop_context)
         }
 
         NodeData::Element { name, attrs, .. } => {
-            let tag_name = name.local.to_string();
+            let mut tag_name = name.local.to_string();
             let attributes = attrs.borrow();
+
+            // CASING RESTORATION: Check if we marked this tag's original casing
+            for attr in attributes.iter() {
+                if attr.name.local.to_string() == "data-zen-orig-name" {
+                    tag_name = attr.value.to_string();
+                    break;
+                }
+            }
 
             // Parse attributes
             let mut parsed_attrs = Vec::new();
@@ -491,39 +474,37 @@ fn parse_dom_node(
             let children_handles = node.children.borrow();
             let mut children = Vec::new();
             for child in children_handles.iter() {
-                if let Some(child_node) = parse_dom_node(
+                children.extend(parse_dom_node(
                     child,
                     expressions,
                     normalized_exprs,
                     parent_loop_context,
                     _file_path,
-                ) {
-                    children.push(child_node);
-                }
+                ));
             }
 
             // Check if this is a component (uppercase first letter)
             if is_component_tag(&tag_name) {
-                Some(TemplateNode::Component(ComponentNode {
+                vec![TemplateNode::Component(ComponentNode {
                     name: tag_name,
                     attributes: parsed_attrs,
                     children,
                     location: SourceLocation { line: 1, column: 1 },
                     loop_context: parent_loop_context.cloned(),
-                }))
+                })]
             } else {
-                Some(TemplateNode::Element(ElementNode {
+                vec![TemplateNode::Element(ElementNode {
                     tag: tag_name,
                     attributes: parsed_attrs,
                     children,
                     location: SourceLocation { line: 1, column: 1 },
                     loop_context: parent_loop_context.cloned(),
-                }))
+                })]
             }
         }
 
-        NodeData::Comment { .. } => None,
-        NodeData::ProcessingInstruction { .. } => None,
+        NodeData::Comment { .. } => vec![],
+        NodeData::ProcessingInstruction { .. } => vec![],
     }
 }
 
@@ -594,15 +575,18 @@ fn process_text_with_expressions(
 /// Parse template from HTML string
 pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, CompilerError> {
     // Step 1: Convert self-closing components
-    let html = convert_self_closing_components(html);
+    let html_self = convert_self_closing_components(html);
 
     // Step 2: Strip script and style blocks
-    let html = strip_blocks(&html);
+    let html_strip = strip_blocks(&html_self);
 
-    // Step 3: Normalize expressions to placeholders
-    let (normalized, normalized_exprs) = normalize_all_expressions(&html);
+    // Step 3: Preserve component casing (html5ever lowercases all tag names)
+    let casing_preserved = mark_component_tags(&html_strip);
 
-    // Step 4: Parse with html5ever
+    // Step 4: Normalize expressions to placeholders
+    let (normalized, normalized_exprs) = normalize_all_expressions(&casing_preserved);
+
+    // Step 5: Parse with html5ever
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
         .read_from(&mut normalized.as_bytes())
@@ -620,23 +604,39 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
     let mut expressions = Vec::new();
     let mut nodes = Vec::new();
 
+    // Check if original source had document tags
+    let has_html_in_src = html.to_lowercase().contains("<html");
+
     fn collect_body_content(
         handle: &Handle,
         nodes: &mut Vec<TemplateNode>,
         expressions: &mut Vec<ExpressionIR>,
         normalized_exprs: &HashMap<String, String>,
         file_path: &str,
+        has_html_in_src: bool,
     ) {
         let node = handle;
         match &node.data {
             NodeData::Document => {
                 for child in node.children.borrow().iter() {
-                    collect_body_content(child, nodes, expressions, normalized_exprs, file_path);
+                    collect_body_content(
+                        child,
+                        nodes,
+                        expressions,
+                        normalized_exprs,
+                        file_path,
+                        has_html_in_src,
+                    );
                 }
             }
             NodeData::Element { name, .. } => {
                 let tag = name.local.to_string().to_lowercase();
-                if tag == "html" || tag == "head" {
+
+                // If it's a wrapper tag (html, head, body) and NOT in the original source,
+                // we flatten it (recurse into children without adding the tag).
+                // This prevents "9 Heads and 9 Bodies" issue while preserving layouts.
+                let is_wrapper = tag == "html" || tag == "head" || tag == "body";
+                if is_wrapper && !has_html_in_src {
                     for child in node.children.borrow().iter() {
                         collect_body_content(
                             child,
@@ -644,30 +644,43 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
                             expressions,
                             normalized_exprs,
                             file_path,
+                            has_html_in_src,
                         );
                     }
-                } else if tag == "body" {
+                } else if tag == "html" {
+                    // Always recurse into <html> but keep it as a node if it was in src?
+                    // Actually, if has_html_in_src is true, we want to keep the tree structure
+                    // but html5ever already ensures <html> is the parent.
+                    // To avoid double wrappers, we recurse into html but keep head and body.
                     for child in node.children.borrow().iter() {
-                        if let Some(n) =
-                            parse_dom_node(child, expressions, normalized_exprs, None, file_path)
-                        {
-                            nodes.push(n);
-                        }
+                        collect_body_content(
+                            child,
+                            nodes,
+                            expressions,
+                            normalized_exprs,
+                            file_path,
+                            has_html_in_src,
+                        );
                     }
                 } else {
-                    // Regular element at document level
-                    if let Some(n) =
-                        parse_dom_node(handle, expressions, normalized_exprs, None, file_path)
-                    {
-                        nodes.push(n);
-                    }
+                    nodes.extend(parse_dom_node(
+                        handle,
+                        expressions,
+                        normalized_exprs,
+                        None,
+                        file_path,
+                    ));
                 }
             }
             NodeData::Doctype { .. } => {
-                if let Some(n) =
-                    parse_dom_node(handle, expressions, normalized_exprs, None, file_path)
-                {
-                    nodes.push(n);
+                if has_html_in_src {
+                    nodes.extend(parse_dom_node(
+                        handle,
+                        expressions,
+                        normalized_exprs,
+                        None,
+                        file_path,
+                    ));
                 }
             }
             _ => {}
@@ -680,6 +693,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
         &mut expressions,
         &normalized_exprs,
         file_path,
+        has_html_in_src,
     );
 
     Ok(TemplateIR {
