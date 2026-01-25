@@ -1,6 +1,6 @@
 {
     "name": "@zenithbuild/compiler",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "description": "The Iron Heart: Native Compiler for the Zenith Framework",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
