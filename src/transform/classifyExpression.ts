@@ -129,7 +129,10 @@ function parseMapExpression(code: string): {
 
     // Find .map( 
     const mapIndex = code.indexOf('.map(')
-    if (mapIndex === -1) return null
+    if (mapIndex === -1) {
+        // console.log('[Classify] No .map( found in:', code.slice(0, 50));
+        return null
+    }
 
     const source = code.slice(0, mapIndex).trim()
     if (!source) return null
@@ -181,8 +184,12 @@ function parseMapExpression(code: string): {
     }
 
     // Check if body contains JSX
-    if (!containsJSX(body)) return null
+    if (!containsJSX(body)) {
+        console.log('[Classify] Body does not contain JSX:', body.slice(0, 50));
+        return null
+    }
 
+    console.log('[Classify] Successfully identified loop for source:', source);
     return { source, itemVar, indexVar, body }
 }
 

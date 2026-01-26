@@ -3,11 +3,7 @@
 use oxc_allocator::{Allocator, Box as oxc_box, CloneIn};
 use oxc_ast::ast::*;
 use oxc_ast::AstBuilder;
-use oxc_ast_visit::walk_mut::{
-    walk_arrow_function_expression, walk_assignment_target, walk_catch_clause, walk_expression,
-    walk_for_in_statement, walk_for_of_statement, walk_for_statement, walk_function, walk_program,
-    walk_simple_assignment_target, walk_statement,
-};
+use oxc_ast_visit::walk_mut;
 use oxc_ast_visit::VisitMut;
 use oxc_span::SPAN;
 use oxc_syntax::scope::ScopeFlags;
@@ -291,7 +287,7 @@ impl<'a> VisitMut<'a> for JsxLowerer<'a> {
                 self.visit_expression(&mut logical.right);
             }
             _ => {
-                walk_expression(self, expr);
+                walk_mut::walk_expression(self, expr);
             }
         }
     }
@@ -406,7 +402,7 @@ impl<'a> ScriptRenamer<'a> {
 impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
     fn visit_program(&mut self, program: &mut Program<'a>) {
         program.body.retain(|stmt| !Self::is_ts_node(stmt));
-        walk_program(self, program);
+        walk_mut::walk_program(self, program);
     }
 
     fn visit_statement(&mut self, stmt: &mut Statement<'a>) {
@@ -485,7 +481,7 @@ impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
                 }
                 self.pop_scope();
             }
-            _ => walk_statement(self, stmt),
+            _ => walk_mut::walk_statement(self, stmt),
         }
     }
 
@@ -513,17 +509,10 @@ impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
         if let Expression::Identifier(id) = expr {
             let name = id.name.to_string();
             if self.should_rename(&name) {
-                println!(
-                    "[ZenithNative] Renaming identifier: {} -> state.{}",
-                    name, name
-                );
                 let member = self.create_state_member(&name);
                 *expr = Expression::from(member);
                 return;
             } else {
-                if self.state_bindings.contains(&name) {
-                    println!("[ZenithNative] NOT renaming shadowed identifier: {}", name);
-                }
             }
         }
 
@@ -553,27 +542,23 @@ impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
             return;
         }
 
-        walk_expression(self, expr);
+        walk_mut::walk_expression(self, expr);
     }
 
     fn visit_assignment_target(&mut self, target: &mut AssignmentTarget<'a>) {
-        walk_assignment_target(self, target);
+        walk_mut::walk_assignment_target(self, target);
     }
 
     fn visit_simple_assignment_target(&mut self, target: &mut SimpleAssignmentTarget<'a>) {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = target {
             let name = id.name.to_string();
             if self.should_rename(&name) {
-                println!(
-                    "[ZenithNative] Renaming assignment target: {} -> state.{}",
-                    name, name
-                );
                 let member = self.create_state_member(&name);
                 *target = SimpleAssignmentTarget::from(member);
                 return;
             }
         }
-        walk_simple_assignment_target(self, target);
+        walk_mut::walk_simple_assignment_target(self, target);
     }
 
     fn visit_for_of_statement(&mut self, stmt: &mut ForOfStatement<'a>) {
@@ -634,5 +619,25 @@ impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
             let new_source = source.replace(".zen", ".js");
             decl.source.value = self.allocator.alloc_str(&new_source).into();
         }
+    }
+
+    fn visit_formal_parameter(&mut self, it: &mut FormalParameter<'a>) {
+        walk_mut::walk_formal_parameter(self, it);
+    }
+
+    fn visit_variable_declarator(&mut self, it: &mut VariableDeclarator<'a>) {
+        walk_mut::walk_variable_declarator(self, it);
+    }
+
+    fn visit_function(&mut self, it: &mut Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        it.return_type = None;
+        it.type_parameters = None;
+        walk_mut::walk_function(self, it, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &mut ArrowFunctionExpression<'a>) {
+        it.return_type = None;
+        it.type_parameters = None;
+        walk_mut::walk_arrow_function_expression(self, it);
     }
 }

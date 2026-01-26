@@ -6,12 +6,7 @@
     if (typeof window === 'undefined') { return; }
 
     // Idempotency guard: runtime should only bootstrap once
-    if (window.__ZENITH_RUNTIME__) {
-        console.log('[Zenith] Runtime already bootstrapped, skipping');
-        return;
-    }
-
-    console.log('[Zenith] Bootstrapping runtime...');
+    if (window.__ZENITH_RUNTIME__) return;
 
     // Internal reactivity state
     let cE = null; const cS = []; let bD = 0; const pE = new Set();
@@ -168,7 +163,6 @@
             let curNodes = [];
             window.zenEffect(() => {
                 const r = child();
-                console.log('[SSR-Debug] Effect ran, result:', r);
                 curNodes.forEach(n => { if (n.parentNode) n.parentNode.removeChild(n); });
                 curNodes = [];
                 if (r == null || r === false) return;

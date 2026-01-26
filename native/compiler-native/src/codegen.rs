@@ -100,7 +100,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let parsable_script = state_re
         .replace_all(&input.script_content, "$1 let ")
         .to_string();
-    println!("[ZenithNative] generate_runtime_code_internal: script_content len={}, parsable_script len={}", input.script_content.len(), parsable_script.len());
 
     // 2. Extract state bindings using Regex (more robust than parsing substituted script)
     // Only match 'state' at statement boundaries to avoid comments
@@ -114,33 +113,11 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     for pb in &input.page_bindings {
         bindings.insert(pb.clone());
     }
-    println!(
-        "[ZenithNative] page_bindings from TS: {:?}",
-        input.page_bindings
-    );
-    println!("[ZenithNative] merged bindings: {:?}", bindings);
 
     let mut state_decls = Vec::new();
     let parser = Parser::new(&allocator, &parsable_script, source_type);
     let ret = parser.parse();
 
-    if !ret.errors.is_empty() {
-        println!(
-            "[ZenithNative] Parser Errors for {}: {:?}",
-            input.file_path, ret.errors
-        );
-        for err in &ret.errors {
-            println!("[ZenithNative] Error: {}", err.message);
-        }
-    }
-
-    println!(
-        "[ZenithNative] Searching for state decls in {} statements",
-        ret.program.body.len()
-    );
-    if ret.program.body.is_empty() && !parsable_script.trim().is_empty() {
-        println!("[ZenithNative] WARNING: Parser returned 0 statements for non-empty script!");
-    }
     let mut found_bindings = HashSet::new();
     for stmt in &ret.program.body {
         if let Statement::VariableDeclaration(var_decl) = stmt {
@@ -148,10 +125,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 if let BindingPattern::BindingIdentifier(id) = &decl.id {
                     let name = id.name.to_string();
                     let in_bindings = bindings.contains(&name);
-                    println!(
-                        "[ZenithNative] Found var decl '{}', in_bindings={}",
-                        name, in_bindings
-                    );
                     if in_bindings {
                         found_bindings.insert(name.clone());
 
@@ -159,19 +132,11 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                             let span = init.span();
                             let init_code =
                                 &parsable_script[span.start as usize..span.end as usize];
-                            println!(
-                                "[ZenithNative] AST extracted state init for '{}': {}",
-                                name, init_code
-                            );
                             state_decls.push(StateDeclaration {
                                 name: name.clone(),
                                 initial_value: init_code.to_string(),
                             });
                         } else {
-                            println!(
-                                "[ZenithNative] State '{}' has no init in AST, using undefined",
-                                name
-                            );
                             state_decls.push(StateDeclaration {
                                 name: name.clone(),
                                 initial_value: "undefined".to_string(),
@@ -192,20 +157,12 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
             if let Ok(re) = Regex::new(&pattern) {
                 if let Some(cap) = re.captures(&input.script_content) {
                     let initial_value = cap[1].trim().to_string();
-                    println!(
-                        "[ZenithNative] Regex fallback for state '{}' = {}",
-                        binding, initial_value
-                    );
                     state_decls.push(StateDeclaration {
                         name: binding.clone(),
                         initial_value,
                     });
                 } else {
                     // No init found, use undefined
-                    println!(
-                        "[ZenithNative] Binding '{}' not found in script, using undefined",
-                        binding
-                    );
                     state_decls.push(StateDeclaration {
                         name: binding.clone(),
                         initial_value: "undefined".to_string(),
@@ -214,7 +171,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
             }
         }
     }
-    println!("[ZenithNative] state_bindings (regex): {:?}", bindings);
 
     // 3. Transform script with identifier renaming and HOIST IMPORTS
     let parser = Parser::new(&allocator, &parsable_script, source_type);
@@ -354,9 +310,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 if let Some(Expression::CallExpression(call)) = &decl.init {
                     if let Expression::Identifier(ident) = &call.callee {
                         if ident.name == "zenRoute" {
-                            println!(
-                                "[ZenithNative] Environment Resolution: Hoisting zenRoute call"
-                            );
                             is_env_call = true;
                             // Extract the full declaration for hoisting
                             let env_code = Codegen::new()
@@ -395,24 +348,10 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     }
     program.body = script_body_no_env;
 
-    println!(
-        "[ZenithNative] Script transformation start for {}...",
-        input.file_path
-    );
-    println!(
-        "[ZenithNative] Imported identifiers to protect: {:?}",
-        imported_identifiers
-    );
     let mut renamer =
         ScriptRenamer::with_locals(&allocator, bindings.clone(), imported_identifiers.clone());
     renamer.visit_program(&mut program);
-    println!("[ZenithNative] Script transformation end.");
     let script_no_imports = Codegen::new().build(&program).code;
-    println!(
-        "[ZenithNative] script_no_imports len={}, imports count={}",
-        script_no_imports.len(),
-        script_imports.len()
-    );
 
     let all_imports = import_lines.join("");
 
@@ -425,10 +364,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     state_vars.insert("props".to_string());
     state_vars.insert("stores".to_string());
     state_vars.insert("loaderData".to_string());
-    println!(
-        "[ZenithNative] state_vars for expressions: {:?}",
-        state_vars
-    );
 
     let loop_vars: HashSet<String> = input.template_bindings.iter().cloned().collect();
 
@@ -527,13 +462,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         .collect::<Vec<_>>()
         .join("\n");
 
-    println!(
-        "[ZenithNative] state_decls has {} entries:",
-        state_decls.len()
-    );
-    for d in &state_decls {
-        println!("[ZenithNative] - {} = {}", d.name, d.initial_value);
-    }
+    for d in &state_decls {}
     let state_props: Vec<String> = state_decls
         .iter()
         .map(|d| format!("  {}: {}", d.name, d.initial_value))

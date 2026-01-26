@@ -19,11 +19,6 @@ export function resolveComponentsInIR(
     ir: ZenIR,
     components: Map<string, ComponentMetadata>
 ): ZenIR {
-    console.error(`[ZenithDebug] resolveComponentsInIR called with ${components.size} components`);
-    for (const [name, meta] of components) {
-        console.error(`[ZenithDebug] Component '${name}': script=${meta.script ? meta.script.length : 'null'} bytes`);
-    }
-
     const irJson = JSON.stringify(ir);
 
     // Convert Map to record for JSON serialization
@@ -33,9 +28,7 @@ export function resolveComponentsInIR(
     }
     const componentsJson = JSON.stringify(componentsRecord);
 
-    console.error(`[ZenithDebug] Calling resolveComponentsNative...`);
     const resolvedJson = resolveComponentsNative(irJson, componentsJson);
-    console.error(`[ZenithDebug] resolveComponentsNative returned ${resolvedJson.length} bytes`);
 
     return JSON.parse(resolvedJson) as ZenIR;
 }

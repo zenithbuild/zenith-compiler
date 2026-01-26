@@ -86,18 +86,6 @@ pub fn resolve_components_native(ir_json: String, components_json: String) -> St
     let components_map: HashMap<String, ComponentIR> =
         serde_json::from_str(&components_json).expect("Failed to parse components");
 
-    eprintln!(
-        "[ZenithNative] resolve_components_native: received {} components",
-        components_map.len()
-    );
-    for (name, comp) in &components_map {
-        eprintln!(
-            "[ZenithNative] Component '{}': script={:?}",
-            name,
-            comp.script.as_ref().map(|s| s.len())
-        );
-    }
-
     let mut ctx = ResolutionContext {
         components: components_map,
         ..Default::default()
@@ -270,26 +258,7 @@ fn resolve_component_node(
 
     // 4. Merge Script
     if let Some(script_content) = &comp.script {
-        eprintln!(
-            "[ZenithNative] Resolving component '{}' instance {} with script len={}",
-            name,
-            instance_id,
-            script_content.len()
-        );
-        eprintln!("[ZenithNative] Local rename map: {:?}", local_rename_map);
-        eprintln!(
-            "[ZenithNative] Unified rename map: {:?}",
-            unified_rename_map
-        );
         let renamed_script = rename_symbols_safe(script_content, &unified_rename_map);
-        eprintln!(
-            "[ZenithNative] Original script (first 200): {}",
-            &script_content[..script_content.len().min(200)]
-        );
-        eprintln!(
-            "[ZenithNative] Renamed script (first 200): {}",
-            &renamed_script[..renamed_script.len().min(200)]
-        );
         ctx.merged_script.push_str("\n\n");
         ctx.merged_script.push_str(&renamed_script);
     }
@@ -315,12 +284,6 @@ fn rewrite_node_expressions(
     id_map: &HashMap<String, String>,
     rename_map: &HashMap<String, String>,
 ) {
-    eprintln!(
-        "[ZenithNative] rewrite_node_expressions: {} nodes, rename_map has {} entries: {:?}",
-        nodes.len(),
-        rename_map.len(),
-        rename_map.keys().collect::<Vec<_>>()
-    );
     for node in nodes {
         match node {
             TemplateNode::Expression(e) => {
@@ -350,13 +313,7 @@ fn rewrite_node_expressions(
                         crate::validate::AttributeValue::Static(value) => {
                             // For event handlers, rename the function reference
                             if is_event_handler {
-                                eprintln!("[ZenithNative] Checking event handler attr '{}' = '{}', rename_map has: {:?}", 
-                                    attr.name, value, rename_map.contains_key(value.as_str()));
                                 if let Some(new_name) = rename_map.get(value.as_str()) {
-                                    eprintln!(
-                                        "[ZenithNative] Renaming event handler '{}' -> '{}'",
-                                        value, new_name
-                                    );
                                     *value = new_name.clone();
                                 }
                             }
@@ -628,13 +585,7 @@ pub fn rename_symbols_safe(code: &str, rename_map: &HashMap<String, String>) -> 
         .with_typescript(true)
         .with_jsx(true);
     let ret = Parser::new(&allocator, &parsable_code, source_type).parse();
-
     if !ret.errors.is_empty() {
-        // Fallback: if parsing still fails, return original unchanged
-        eprintln!(
-            "[ZenithNative] rename_symbols_safe parse failed for code: {}",
-            &code[..code.len().min(100)]
-        );
         return code.to_string();
     }
 
@@ -667,12 +618,6 @@ fn get_local_declarations(script: &str) -> HashSet<String> {
     // Preprocess: Replace "state " with "let " so Oxc can parse Zenith's custom keyword
     let parsable_script = script.replace("state ", "let ");
 
-    eprintln!(
-        "[ZenithNative] get_local_declarations: script len={}, parsable (first 100)={}",
-        script.len(),
-        &parsable_script[..parsable_script.len().min(100)]
-    );
-
     let allocator = Allocator::default();
     let source_type = SourceType::default()
         .with_module(true)
@@ -681,19 +626,9 @@ fn get_local_declarations(script: &str) -> HashSet<String> {
     let ret = Parser::new(&allocator, &parsable_script, source_type).parse();
 
     let mut symbols = HashSet::new();
-
     if !ret.errors.is_empty() {
-        eprintln!(
-            "[ZenithNative] get_local_declarations: PARSE ERRORS: {:?}",
-            ret.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
-        );
         return symbols;
     }
-
-    eprintln!(
-        "[ZenithNative] get_local_declarations: parse OK, {} statements",
-        ret.program.body.len()
-    );
 
     for stmt in ret.program.body {
         match stmt {
@@ -716,10 +651,6 @@ fn get_local_declarations(script: &str) -> HashSet<String> {
         }
     }
 
-    eprintln!(
-        "[ZenithNative] get_local_declarations: found symbols {:?}",
-        symbols
-    );
     symbols
 }
 

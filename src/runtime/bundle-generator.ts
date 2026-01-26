@@ -50,7 +50,9 @@ export function generateBundleJS(pluginData?: Record<string, any>): string {
       lifecycleJS = transformExportsToGlobal(readFileSync(lifecycleFile, 'utf-8'));
     }
   } catch (e) {
-    console.warn('[Zenith] Could not load runtime from core, falling back to internal', e)
+    if (process.env.ZENITH_DEBUG === 'true') {
+      console.warn('[Zenith] Could not load runtime from core, falling back to internal', e);
+    }
   }
 
   // Fallback to internal hydration_runtime.js from native compiler source

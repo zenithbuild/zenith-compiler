@@ -290,7 +290,15 @@ fn normalize_all_expressions(html: &str) -> (String, HashMap<String, String>) {
         if c == '{' {
             // Make sure it's not an escaped brace or inside a string
             if let Some(end) = find_balanced_brace_end(html, i) {
-                let expr_content: String = chars[i + 1..end - 1].iter().collect();
+                let mut expr_content: String = chars[i + 1..end - 1].iter().collect();
+
+                // STRIP HTML COMMENTS: Expressions like { items.map(i => ( <!-- comment --> <div/> )) }
+                // contain HTML comments which are invalid in JS context.
+                lazy_static! {
+                    static ref HTML_COMMENT_RE: Regex = Regex::new(r"(?s)<!--.*?-->").unwrap();
+                }
+                expr_content = HTML_COMMENT_RE.replace_all(&expr_content, "").to_string();
+
                 let placeholder = format!("__ZENITH_EXPR_{}__", expr_counter);
                 expressions.insert(placeholder.clone(), expr_content);
                 normalized.push_str(&placeholder);
