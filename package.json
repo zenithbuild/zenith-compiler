@@ -1,49 +1,49 @@
 {
-    "name": "@zenithbuild/compiler",
-    "version": "1.0.13",
-    "description": "The Iron Heart: Native Compiler for the Zenith Framework",
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
-    "exports": {
-        ".": "./dist/index.js",
-        "./config": "./dist/core/config/index.js",
-        "./plugins": "./dist/core/plugins/index.js",
-        "./runtime": "./dist/runtime/index.js"
-    },
-    "files": [
-        "dist",
-        "native/compiler-native/index.js",
-        "native/compiler-native/index.d.ts",
-        "native/compiler-native/package.json",
-        "native/compiler-native/compiler-native.node"
-    ],
-    "publishConfig": {
-        "access": "public"
-    },
-    "scripts": {
-        "build": "tsc --skipLibCheck && cd native/compiler-native && bun run build",
-        "test": "bun test"
-    },
-    "dependencies": {
-        "esbuild": "^0.20.0",
-        "ws": "^8.16.0",
-        "rolldown": "latest",
-        "@zenithbuild/router": "latest",
-        "acorn": "^8.15.0",
-        "es-module-lexer": "^2.0.0",
-        "marked": "^17.0.1",
-        "parse5": "^8.0.0",
-        "picocolors": "^1.1.1",
-        "prompts": "^2.4.2",
-        "glob": "^10.3.10"
-    },
-    "devDependencies": {
-        "@types/node": "^20.11.0",
-        "@types/acorn": "^6.0.4",
-        "@types/marked": "^6.0.0",
-        "@types/parse5": "^7.0.0",
-        "@types/prompts": "^2.4.9",
-        "typescript": "^5.3.3",
-        "bun-types": "latest"
-    }
+  "name": "@zenithbuild/compiler",
+  "version": "1.0.14",
+  "description": "The Iron Heart: Native Compiler for the Zenith Framework",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./config": "./dist/core/config/index.js",
+    "./plugins": "./dist/core/plugins/index.js",
+    "./runtime": "./dist/runtime/index.js"
+  },
+  "files": [
+    "dist",
+    "native/compiler-native/index.js",
+    "native/compiler-native/index.d.ts",
+    "native/compiler-native/package.json",
+    "native/compiler-native/compiler-native.node"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc --skipLibCheck && cd native/compiler-native && bun run build",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "esbuild": "^0.20.0",
+    "ws": "^8.16.0",
+    "rolldown": "latest",
+    "@zenithbuild/router": "latest",
+    "acorn": "^8.15.0",
+    "es-module-lexer": "^2.0.0",
+    "marked": "^17.0.1",
+    "parse5": "^8.0.0",
+    "picocolors": "^1.1.1",
+    "prompts": "^2.4.2",
+    "glob": "^10.3.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/acorn": "^6.0.4",
+    "@types/marked": "^6.0.0",
+    "@types/parse5": "^7.0.0",
+    "@types/prompts": "^2.4.9",
+    "typescript": "^5.3.3",
+    "bun-types": "latest"
+  }
 }
