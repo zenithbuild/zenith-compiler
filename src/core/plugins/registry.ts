@@ -85,7 +85,7 @@ export class PluginRegistry {
         for (const plugin of this.plugins.values()) {
             try {
                 await plugin.setup(ctx);
-                console.log(`[Zenith] Plugin "${plugin.name}" initialized`);
+
             } catch (error: unknown) {
                 const message = error instanceof Error ? error.message : String(error);
                 console.error(`[Zenith] Failed to initialize plugin "${plugin.name}":`, message);

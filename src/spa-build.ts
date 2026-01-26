@@ -874,14 +874,14 @@ export async function buildSPA(options: SPABuildOptions): Promise<void> {
     return
   }
 
-  console.log(`[Zenith Build] Found ${pageFiles.length} page(s)`)
+
 
   // Compile all pages
   const compiledPages: CompiledPage[] = []
   const layoutStyles: string[] = []
 
   for (const pageFile of pageFiles) {
-    console.log(`[Zenith Build] Compiling: ${path.relative(pagesDir, pageFile)}`)
+
 
     try {
       const compiled = await compilePage(pageFile, pagesDir)
@@ -911,14 +911,10 @@ export async function buildSPA(options: SPABuildOptions): Promise<void> {
     fs.copyFileSync(faviconPath, path.join(outDir, "favicon.ico"))
   }
 
-  console.log(`[Zenith Build] Successfully built ${compiledPages.length} page(s)`)
-  console.log(`[Zenith Build] Output: ${outDir}/index.html`)
+
 
   // Log route manifest
-  console.log("\n[Zenith Build] Route Manifest:")
-  for (const page of compiledPages) {
-    console.log(`  ${page.routePath.padEnd(25)} → ${path.relative(pagesDir, page.filePath)} (score: ${page.score})`)
-  }
+
 }
 
 /**
@@ -926,6 +922,6 @@ export async function buildSPA(options: SPABuildOptions): Promise<void> {
  */
 export function watchSPA(_options: SPABuildOptions): void {
   // TODO: Implement file watching
-  console.log("[Zenith Build] Watch mode not yet implemented")
+
 }
 
