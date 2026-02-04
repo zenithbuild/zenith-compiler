@@ -1,12 +1,13 @@
 /**
  * Component Discovery
  * 
- * Discovers and catalogs components in a Zenith project
- * Similar to layout discovery but for reusable components
+ * Discovers and catalogs components in a Zenith project using standard 
+ * file system walking and the unified native "syscall" for metadata.
  */
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { parseZenFile } from '../parseZenFile'
 import type { TemplateNode, ExpressionIR } from '../ir/types'
 
 export interface SlotDefinition {
@@ -25,6 +26,7 @@ export interface ComponentMetadata {
     expressions: ExpressionIR[] // Component-level expressions
     slots: SlotDefinition[]
     props: string[]       // Declared props
+    states: Record<string, string> // Declared state (name -> initializer)
     styles: string[]      // Raw CSS from <style> blocks
     script: string | null         // Raw script content for bundling
     scriptAttributes: Record<string, string> | null  // Script attributes (setup, lang)
@@ -32,49 +34,57 @@ export interface ComponentMetadata {
     hasStyles: boolean
 }
 
-
-let native: any
-try {
-    try {
-        native = require('../../native/compiler-native')
-    } catch {
-        native = require('../../native/compiler-native/index.js')
-    }
-} catch (e) {
-    // Bridge load handled elsewhere
-}
-
 /**
- * Discover all components in a directory
- * @param baseDir - Base directory to search (e.g., src/components)
- * @returns Map of component name to metadata
+ * Discover all components in a directory recursively
  */
 export function discoverComponents(baseDir: string): Map<string, ComponentMetadata> {
-    if (native && native.discoverComponentsNative) {
-        try {
-            const raw = native.discoverComponentsNative(baseDir)
-            // The native function returns a Map-like object or Record
-            const components = new Map<string, ComponentMetadata>()
-            for (const [name, metadata] of Object.entries(raw)) {
-                components.set(name, metadata as ComponentMetadata)
-            }
-            return components
-        } catch (error: any) {
-            console.warn(`[Zenith Native] Discovery failed for ${baseDir}: ${error.message}`)
-        }
-    }
+    const components = new Map<string, ComponentMetadata>()
 
-    // Fallback or empty if native fails (bridge is required for performance)
-    return new Map<string, ComponentMetadata>()
+    if (!fs.existsSync(baseDir)) return components;
+
+    const walk = (dir: string) => {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+            const fullPath = path.join(dir, file);
+            if (fs.statSync(fullPath).isDirectory()) {
+                walk(fullPath);
+            } else if (file.endsWith('.zen')) {
+                const name = path.basename(file, '.zen');
+                try {
+                    // Call the "One True Bridge" in metadata mode
+                    const ir = parseZenFile(fullPath, undefined, { mode: 'metadata' });
+
+                    // Map IR to ComponentMetadata format
+                    components.set(name, {
+                        name,
+                        path: fullPath,
+                        template: ir.template.raw,
+                        nodes: ir.template.nodes,
+                        expressions: ir.template.expressions,
+                        slots: [], // Native bridge needs to return slot info in IR if used
+                        props: ir.props || [],
+                        states: ir.script?.states || {},
+                        styles: ir.styles?.map((s: any) => s.raw) || [],
+                        script: ir.script?.raw || null,
+                        scriptAttributes: ir.script?.attributes || null,
+                        hasScript: !!ir.script,
+                        hasStyles: ir.styles?.length > 0
+                    });
+                } catch (e) {
+                    console.error(`[Zenith Discovery] Failed to parse component ${file}:`, e);
+                }
+            }
+        }
+    };
+
+    walk(baseDir);
+    return components;
 }
 
 /**
- * Use native bridge for tag name checks
+ * Universal Zenith Component Tag Rule: PascalCase
  */
 export function isComponentTag(tagName: string): boolean {
-    if (native && native.isComponentTagNative) {
-        return native.isComponentTagNative(tagName)
-    }
     return tagName.length > 0 && tagName[0] === tagName[0]?.toUpperCase()
 }
 

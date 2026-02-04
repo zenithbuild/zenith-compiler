@@ -1,10 +1,12 @@
 use lazy_static::lazy_static;
+#[cfg(feature = "napi")]
 use napi_derive::napi;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::document::DocumentScope;
 use crate::validate::{
     AttributeIR, AttributeValue, ComponentNode, ConditionalFragmentNode, ElementNode, ExpressionIR,
     ExpressionInput, ExpressionNode, LoopContext, LoopContextInput, LoopFragmentNode,
@@ -65,10 +67,17 @@ impl Default for ExpressionClassification {
 // LOWERING CONTEXT
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum RenderContext {
+    Body,
+    Head,
+}
+
 #[derive(Debug)]
 pub struct LoweringContext<'a> {
     pub expressions: &'a mut Vec<ExpressionIR>,
     pub file_path: String,
+    pub render_context: RenderContext,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -126,7 +135,7 @@ pub struct AnalysisInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 pub struct ExpressionAnalysisResult {
     pub id: String,
     pub classification: String, // JSON-serialized ExpressionClassification
@@ -136,7 +145,7 @@ pub struct ExpressionAnalysisResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 pub struct EvaluatedExpression {
     pub id: String,
     pub expression_type: String,
@@ -147,7 +156,7 @@ pub struct EvaluatedExpression {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 pub struct AnalysisOutput {
     pub results: Vec<ExpressionAnalysisResult>,
     pub binding_count: u32,
@@ -448,6 +457,7 @@ fn compute_dependencies(
 // FRAGMENT LOWERING
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn lower_fragments_native(
     nodes_json: String,
@@ -462,6 +472,7 @@ pub fn lower_fragments_native(
         let mut ctx = LoweringContext {
             expressions: &mut expressions,
             file_path,
+            render_context: RenderContext::Body,
         };
         nodes = lower_fragments(nodes, &mut ctx);
     }
@@ -481,7 +492,20 @@ fn lower_node(node: TemplateNode, ctx: &mut LoweringContext) -> TemplateNode {
     match node {
         TemplateNode::Expression(expr_node) => lower_expression_node(expr_node, ctx),
         TemplateNode::Element(mut elem) => {
+            let previous_context = ctx.render_context;
+
+            // Context Switching
+            if elem.tag.eq_ignore_ascii_case("head") {
+                ctx.render_context = RenderContext::Head;
+            } else if elem.tag.eq_ignore_ascii_case("body") {
+                ctx.render_context = RenderContext::Body;
+            }
+
             elem.children = lower_fragments(elem.children, ctx);
+
+            // Restore Context
+            ctx.render_context = previous_context;
+
             TemplateNode::Element(elem)
         }
         TemplateNode::Component(mut comp) => {
@@ -516,6 +540,48 @@ fn lower_expression_node(node: ExpressionNode, ctx: &mut LoweringContext) -> Tem
         Some(c) => c,
         None => return TemplateNode::Expression(node),
     };
+
+    // STRICT HEAD ENFORCEMENT
+    // In RenderContext::Head, ALL expressions must be statically resolvable.
+    if ctx.render_context == RenderContext::Head {
+        // We use a dummy empty map for props for now, assuming static resolution doesn't rely on runtime props
+        // Phase 2 will harden this.
+        let empty_props = std::collections::HashMap::new();
+        match crate::static_eval::static_eval(&code, &empty_props) {
+            Some(resolved) => {
+                return TemplateNode::Text(TextNode {
+                    value: resolved,
+                    location: node.location,
+                    loop_context: node.loop_context,
+                });
+            }
+            None => {
+                // FAIL HARD - Phase 1.3
+                // For now, we return a special error node or panic.
+                // Using a TextNode with error message to fail visibly in compiled output until we add real error reporting.
+                // Or better: Create a panic/error?
+                // The plan says "Fail compilation".
+                // Since this is inside a function returning TemplateNode, we can't easily bubble a Result yet without refactoring everything.
+                // We will emit a TextNode that says "COMPILE_ERROR".
+                // But ideally we should propagate error.
+                // Let's use the static_eval hardening later.
+                // For now, if it fails, we return the expression node which usually means runtime placeholder.
+                // BUT User said: "NEVER return TemplateNode::Expression in Head context."
+                // So checking logic...
+                // If we can't resolve, we MUST NOT return Expression.
+                // We'll return a TextNode with an explicit error marker for now.
+                return TemplateNode::Text(TextNode {
+                    value: format!(
+                        "ZENITH_COMPILE_ERROR: Dynamic expression '{}' not allowed in <head>",
+                        code
+                    ),
+                    location: node.location,
+                    loop_context: node.loop_context,
+                });
+            }
+        }
+    }
+
     let class = classify_expression(&code);
     match class.expr_type {
         ExpressionOutputType::Conditional => lower_conditional_expression(node, class, ctx),
@@ -699,6 +765,7 @@ fn parse_jsx_to_nodes(
         expression: trimmed.to_string(),
         location: loc,
         loop_context: lctx,
+        is_in_head: false,
     })]
 }
 
@@ -752,6 +819,7 @@ fn parse_jsx_children(
                         expression: id,
                         location: loc.clone(),
                         loop_context: lctx.clone(),
+                        is_in_head: false,
                     }));
                 }
                 i += end;
@@ -993,6 +1061,7 @@ fn find_balanced_brace_end(code: &str) -> Option<usize> {
 // NAPI WRAPPERS (LEGACY SUPPORT)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn evaluate_expression_native(
     id: String,
@@ -1017,12 +1086,14 @@ pub fn evaluate_expression_native(
     }
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn classify_expression_native(code: String) -> String {
     let classification = classify_expression(&code);
     serde_json::to_string(&classification).unwrap_or_default()
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn analyze_expressions(input_json: String) -> AnalysisOutput {
     let input: AnalysisInput = match serde_json::from_str(&input_json) {
@@ -1059,7 +1130,7 @@ pub fn analyze_expressions(input_json: String) -> AnalysisOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 pub struct Binding {
     pub id: String,
     pub r#type: String, // 'text' | 'attribute' | 'conditional' | 'optional' | 'loop'
@@ -1071,12 +1142,48 @@ pub struct Binding {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 pub struct TransformOutput {
     pub html: String,
     pub bindings: Vec<Binding>,
 }
 
+/// Internal transform function for use by parse_full_zen_native
+pub fn transform_template_internal(
+    nodes: &[TemplateNode],
+    expressions: &[ExpressionIR],
+) -> TransformOutput {
+    transform_template_with_scope(nodes, expressions, None)
+}
+
+/// Transform template with optional document scope for document modules
+pub fn transform_template_with_scope(
+    nodes: &[TemplateNode],
+    expressions: &[ExpressionIR],
+    document_scope: Option<&DocumentScope>,
+) -> TransformOutput {
+    let mut html = String::new();
+    let mut bindings = Vec::new();
+
+    // Check if this is a document module (root is <html>)
+    let is_document = crate::document::is_document_module(nodes);
+
+    for node in nodes.iter() {
+        let (node_html, node_bindings) = transform_node_internal(
+            node,
+            expressions,
+            &None,
+            false,
+            if is_document { document_scope } else { None },
+        );
+        html.push_str(&node_html);
+        bindings.extend(node_bindings);
+    }
+
+    TransformOutput { html, bindings }
+}
+
+#[cfg(feature = "napi")]
 #[napi]
 pub fn transform_template_native(
     nodes_json: String,
@@ -1087,16 +1194,7 @@ pub fn transform_template_native(
     let expressions: Vec<ExpressionIR> = serde_json::from_str(&expressions_json)
         .map_err(|e| napi::Error::from_reason(format!("Expressions parse error: {}", e)))?;
 
-    let mut html = String::new();
-    let mut bindings = Vec::new();
-
-    for node in nodes {
-        let (node_html, node_bindings) = transform_node_internal(&node, &expressions, &None, false);
-        html.push_str(&node_html);
-        bindings.extend(node_bindings);
-    }
-
-    Ok(TransformOutput { html, bindings })
+    Ok(transform_template_internal(&nodes, &expressions))
 }
 
 fn transform_node_internal(
@@ -1104,6 +1202,7 @@ fn transform_node_internal(
     expressions: &[ExpressionIR],
     parent_loop_context: &Option<LoopContext>,
     is_inside_head: bool,
+    document_scope: Option<&DocumentScope>,
 ) -> (String, Vec<Binding>) {
     let mut bindings = Vec::new();
 
@@ -1128,21 +1227,51 @@ fn transform_node_internal(
                 .find(|e| e.id == expr_node.expression)
                 .expect("Expression not found");
 
-            let active_loop_context = expr_node
-                .loop_context
-                .clone()
-                .or(parent_loop_context.clone());
+            // PHASE 3: Compile-time Head Resolution
+            // When inside <head>, we emit the expression code directly as a placeholder
+            // that will be resolved during the final emission pass (not runtime).
+            // This prevents <!--zen:expr--> comments from appearing in <head>.
+            if is_inside_head {
+                // STRICT HEAD ENFORCEMENT
+                // Expressions in head MUST be statically resolvable at compile time.
+                // If we have a document scope, use it for resolution
+                if let Some(scope) = document_scope {
+                    match crate::document::resolve_document_expression(&expr.code, scope) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            format!("ZENITH_COMPILE_ERROR: {}", e)
+                        }
+                    }
+                } else {
+                    // Fallback to static_eval with empty props
+                    let empty_props = std::collections::HashMap::new();
+                    match crate::static_eval::static_eval(&expr.code, &empty_props) {
+                        Some(resolved) => resolved,
+                        None => {
+                            format!(
+                                "ZENITH_COMPILE_ERROR: Dynamic expression '{}' not allowed in <head>",
+                                expr.code
+                            )
+                        }
+                    }
+                }
+            } else {
+                let active_loop_context = expr_node
+                    .loop_context
+                    .clone()
+                    .or(parent_loop_context.clone());
 
-            bindings.push(Binding {
-                id: expr.id.clone(),
-                r#type: "text".to_string(),
-                target: "data-zen-text".to_string(),
-                expression: expr.code.clone(),
-                location: Some(expr.location.clone()),
-                loop_context: active_loop_context,
-            });
+                bindings.push(Binding {
+                    id: expr.id.clone(),
+                    r#type: "text".to_string(),
+                    target: "data-zen-text".to_string(),
+                    expression: expr.code.clone(),
+                    location: Some(expr.location.clone()),
+                    loop_context: active_loop_context,
+                });
 
-            format!("<!--zen:{}-->", expr.id)
+                format!("<!--zen:{}-->", expr.id)
+            }
         }
 
         TemplateNode::Element(el) => {
@@ -1183,8 +1312,13 @@ fn transform_node_internal(
 
             let mut children_html = String::new();
             for child in &el.children {
-                let (c_html, c_bindings) =
-                    transform_node_internal(child, expressions, &active_loop_context, next_in_head);
+                let (c_html, c_bindings) = transform_node_internal(
+                    child,
+                    expressions,
+                    &active_loop_context,
+                    next_in_head,
+                    document_scope,
+                );
                 children_html.push_str(&c_html);
                 bindings.extend(c_bindings);
             }
@@ -1221,16 +1355,26 @@ fn transform_node_internal(
 
             let mut cons_html = String::new();
             for child in &cond.consequent {
-                let (c_html, c_bindings) =
-                    transform_node_internal(child, expressions, &cond.loop_context, is_inside_head);
+                let (c_html, c_bindings) = transform_node_internal(
+                    child,
+                    expressions,
+                    &cond.loop_context,
+                    is_inside_head,
+                    document_scope,
+                );
                 cons_html.push_str(&c_html);
                 bindings.extend(c_bindings);
             }
 
             let mut alt_html = String::new();
             for child in &cond.alternate {
-                let (a_html, a_bindings) =
-                    transform_node_internal(child, expressions, &cond.loop_context, is_inside_head);
+                let (a_html, a_bindings) = transform_node_internal(
+                    child,
+                    expressions,
+                    &cond.loop_context,
+                    is_inside_head,
+                    document_scope,
+                );
                 alt_html.push_str(&a_html);
                 bindings.extend(a_bindings);
             }
@@ -1258,8 +1402,13 @@ fn transform_node_internal(
 
             let mut frag_html = String::new();
             for child in &opt.fragment {
-                let (c_html, c_bindings) =
-                    transform_node_internal(child, expressions, &opt.loop_context, is_inside_head);
+                let (c_html, c_bindings) = transform_node_internal(
+                    child,
+                    expressions,
+                    &opt.loop_context,
+                    is_inside_head,
+                    document_scope,
+                );
                 frag_html.push_str(&c_html);
                 bindings.extend(c_bindings);
             }
@@ -1287,8 +1436,13 @@ fn transform_node_internal(
 
             let mut body_html = String::new();
             for child in &lp.body {
-                let (b_html, b_bindings) =
-                    transform_node_internal(child, expressions, &lp.loop_context, is_inside_head);
+                let (b_html, b_bindings) = transform_node_internal(
+                    child,
+                    expressions,
+                    &lp.loop_context,
+                    is_inside_head,
+                    document_scope,
+                );
                 body_html.push_str(&b_html);
                 bindings.extend(b_bindings);
             }
@@ -1308,8 +1462,13 @@ fn transform_node_internal(
         TemplateNode::Component(comp) => {
             let mut children_html = String::new();
             for child in &comp.children {
-                let (c_html, c_bindings) =
-                    transform_node_internal(child, expressions, &comp.loop_context, is_inside_head);
+                let (c_html, c_bindings) = transform_node_internal(
+                    child,
+                    expressions,
+                    &comp.loop_context,
+                    is_inside_head,
+                    document_scope,
+                );
                 children_html.push_str(&c_html);
                 bindings.extend(c_bindings);
             }

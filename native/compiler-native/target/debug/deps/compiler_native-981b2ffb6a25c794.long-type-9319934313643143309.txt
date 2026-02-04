@@ -1,5 +1,0 @@
-oxc_ast::ast::PropertyKey<'_>
-oxc_ast::ast::IdentifierName<'_>
-oxc_ast::ast::PropertyKey<'_>: From<oxc_ast::ast::IdentifierName<'_>>
-From<oxc_ast::ast::Expression<'_>>
-From<oxc_ast::ast::MemberExpression<'_>>

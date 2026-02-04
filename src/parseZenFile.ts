@@ -1,64 +1,74 @@
 /**
  * Zenith File Parser (Native Bridge)
  * 
- * Delegates parsing of .zen files to the Rust native compiler.
+ * Delegates all Zenith compilation to the Rust native "syscall" bridge.
+ * Zero fallbacks. Zero runtime abstraction.
  */
 
 import { readFileSync } from 'fs'
-import type { ZenIR, StyleIR } from './ir/types'
+import type { ZenIR } from './ir/types'
 import { CompilerError } from './errors/compilerError'
 
 let native: any
 try {
-    try {
-        native = require('../native/compiler-native')
-    } catch {
-        native = require('../native/compiler-native/index.js')
-    }
+    native = require('../native/compiler-native')
 } catch (e) {
-    // Bridge load handled elsewhere
+    // If not in standard node_modules, check build output
+    try {
+        native = require('../native/compiler-native/index.js')
+    } catch {
+        // FATAL: The native bridge is a requirement, not an enhancement.
+        console.error('\n\x1b[31m[Zenith Critical] Native bridge unavailable.\x1b[0m');
+        console.error('The Zenith compiler requires the Rust-based native bridge to function.');
+        console.error('Please run "bun run build:native" in the zenith-compiler directory.\n');
+        process.exit(1);
+    }
+}
+
+export interface ParseOptions {
+    mode?: 'metadata' | 'full'
+    components?: Record<string, any>
+    layout?: any
+    props?: Record<string, any>
+    useCache?: boolean
 }
 
 /**
- * Parse a .zen file into IR via Native Bridge
+ * Perform a Zenith "Syscall" to the native compiler
  */
-export function parseZenFile(filePath: string, sourceInput?: string): ZenIR {
-    let source: string
+export function parseZenFile(filePath: string, sourceInput?: string, options: ParseOptions = {}): any {
+    const source = sourceInput ?? readFileSync(filePath, 'utf-8');
 
-    if (sourceInput) {
-        source = sourceInput
-    } else {
-        try {
-            source = readFileSync(filePath, 'utf-8')
-        } catch (error: any) {
-            throw new CompilerError(
-                `Failed to read file: ${error.message}`,
-                filePath,
-                1,
-                1
-            )
-        }
+    // Default to full mode unless specified (e.g. for metadata extraction during discovery)
+    const mode = options.mode ?? 'full';
+    const useCache = options.useCache ?? (process.env.ZENITH_CACHE !== '0');
+
+    if (!native.parseFullZenNative) {
+        throw new Error('[Zenith Critical] Broken native bridge: parseFullZenNative symbol missing. Rebuild required.');
     }
 
-    if (native && native.parseTemplateNative && native.parseScriptNative && native.extractStylesNative) {
+    try {
+        // Pass options as JSON string to avoid napi-rs undefined handling issues
+        const nativeOptions = {
+            mode: mode,
+            useCache: useCache,
+            components: options.components ?? null,
+            layout: options.layout ?? null,
+            props: options.props ?? null,
+        };
 
-        try {
-            const template = native.parseTemplateNative(source, filePath)
-            const script = native.parseScriptNative(source)
-            const stylesRaw = native.extractStylesNative(source)
-            const styles: StyleIR[] = stylesRaw.map((s: string) => ({ raw: s }));
+        const result = native.parseFullZenNative(source, filePath, JSON.stringify(nativeOptions));
 
-            return {
-                filePath,
-                template,
-                script,
-                styles
-            }
-        } catch (error: any) {
-            console.warn(`[Zenith Native] Parsing failed for ${filePath}: ${error.message}`)
-            throw error
+        // The result might be a ZenIR (metadata) or FinalizedOutput (full)
+        // or a CompilerError object if the native side returned one.
+        if (result && result.code && result.errorType) {
+            // Re-throw as proper TypeScript error if needed, but native result is usually enough
+            return result;
         }
-    }
 
-    throw new Error(`[Zenith Native] Parser bridge unavailable - cannot compile ${filePath}`)
+        return result;
+    } catch (error: any) {
+        // Native panic or unhandled error
+        throw new Error(`[Zenith Native Fatal] ${error.message}\nFile: ${filePath}`);
+    }
 }

@@ -1,6 +1,0 @@
-oxc_ast::ast::ArrayExpressionElement<'_>
-&oxc_ast::ast::Expression<'_>
-oxc_ast::ast::ArrayExpressionElement<'_>: From<&oxc_ast::ast::Expression<'_>>
-From<oxc_ast::ast::Argument<'_>>
-From<oxc_ast::ast::Expression<'_>>
-From<oxc_ast::ast::MemberExpression<'_>>

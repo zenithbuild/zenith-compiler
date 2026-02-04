@@ -3,3 +3,12 @@ dist/
 node_modules/
 .DS_Store
 *.log
+target/
+**/target/
+*.node
+*.dylib
+*.rlib
+*.rmeta
+*.d
+*.a
+EOF

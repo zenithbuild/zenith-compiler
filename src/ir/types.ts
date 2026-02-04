@@ -18,6 +18,26 @@ export interface ScriptImport {
 }
 
 /**
+ * Property extracted from interface/type definition
+ * Used by props<T>() constraint - shape-only parsing
+ */
+export interface PropTypeProperty {
+  name: string
+  optional: boolean               // ? suffix
+  typeAnnotation: string          // Shape-only, for documentation
+}
+
+/**
+ * TypeScript type binding parsed from props<T>() constraint
+ * This is a CONSTRAINT, not a declaration - it restricts allowed props
+ */
+export interface PropsTypeBinding {
+  typeName: string                    // e.g., "Props", "ButtonProps"
+  sourceFile?: string                 // For type imports
+  properties: PropTypeProperty[]      // Extracted from interface/type
+}
+
+/**
  * Component Script IR - represents a component's script block
  * Used for collecting and bundling component scripts
  */
@@ -30,6 +50,7 @@ export type ComponentScriptIR = {
   instanceId?: string                    // Unique instance ID for flattening
   propValues?: Record<string, any>       // Concrete props for this instance
   expressions?: ExpressionIR[]           // Instance-specific expression IRs
+  propsTypeBinding?: PropsTypeBinding    // TypeScript props<T>() constraint
 }
 
 export type ZenIR = {
@@ -37,8 +58,11 @@ export type ZenIR = {
   template: TemplateIR
   script: ScriptIR | null
   styles: StyleIR[]
+  states?: Record<string, string>         // Page-level state (name -> initializer)
   componentScripts?: ComponentScriptIR[]  // Scripts from used components
   pageBindings?: string[]                 // Page-level state bindings (extracted BEFORE component inlining)
+  props?: string[]                        // Declared props
+  mergedBindings?: string[]               // Combined bindings (locals + imports)
 }
 
 export type TemplateIR = {
@@ -175,6 +199,9 @@ export type ExpressionIR = {
 export type ScriptIR = {
   raw: string
   attributes: Record<string, string>
+  props?: string[]
+  states?: Record<string, string>         // Component-level state
+  bindings?: string[]                     // Local bindings (functions, let/const, imports)
 }
 
 export type StyleIR = {

@@ -12,6 +12,7 @@ export interface RuntimeCode {
   stateInit: string
   bundle: string
   npmImports: Array<ScriptImport>
+  errors: Array<string>
 }
 export interface ScriptImport {
   source: string
@@ -26,8 +27,7 @@ export declare function resolveComponentsNative(irJson: string, componentsJson: 
 export declare function discoverComponentsNative(baseDir: string): any
 export declare function extractStylesNative(source: string): Array<string>
 export declare function extractPageBindingsNative(script: string): Array<string>
-/** Discover layouts in a directory */
-export declare function discoverLayoutsNative(layoutsDir: string): any
+export declare function extractPagePropsNative(script: string): Array<string>
 export interface VirtualModule {
   id: string
   code: string
@@ -39,20 +39,59 @@ export interface BundlePlan {
   resolveRoots: Array<string>
   virtualModules: Array<VirtualModule>
 }
+/**
+ * Manifest export for the bundler's capability-based chunking.
+ * This is the Compiler → Bundler handshake contract.
+ */
+export interface ZenManifestExport {
+  /** Entry point path */
+  entry: string
+  /** Pre-rendered HTML template */
+  template: string
+  /** Whether this page uses reactive state */
+  usesState: boolean
+  /** Whether this page has event handlers */
+  hasEvents: boolean
+  /** Whether this page is fully static */
+  isStatic: boolean
+  /** CSS classes used by this page (for pruning) */
+  cssClasses: Array<string>
+  /** Required runtime capabilities (as strings for JS interop) */
+  requiredCapabilities: Array<string>
+  /** Compiled script content (author code) */
+  script: string
+  /** Compiled expressions */
+  expressions: string
+  /** Compiled styles */
+  styles: string
+  /** NPM imports */
+  npmImports: string
+}
 export interface FinalizedOutput {
   html: string
-  js: string
-  npmImports: string
-  styles: Array<string>
   hasErrors: boolean
   errors: Array<string>
-  bundlePlan?: BundlePlan
+  /** Manifest for bundler's capability-based chunking */
+  manifest?: ZenManifestExport
 }
 export declare function finalizeOutputNative(irJson: any, compiledJson: any): FinalizedOutput
-export declare function processLayoutNative(source: string, layoutJson: string, propsJson: string): string
 export declare function parseTemplateNative(html: string, filePath: string): any
 export declare function parseScriptNative(html: string): any | null
 export declare function isComponentTagNative(tagName: string): boolean
+/**
+ * Full Zenith compilation entry point - the "One True Syscall"
+ *
+ * Combines: parse_template + parse_script → ZenIR → component resolution →
+ * transform → finalize → FinalizedOutput
+ */
+export interface ParseFullOptions {
+  mode?: string
+  useCache?: boolean
+  components?: any
+  layout?: any
+  props?: any
+}
+export declare function parseFullZenNative(source: string, filePath: string, optionsJson: string): any
 export interface ExpressionAnalysisResult {
   id: string
   classification: string

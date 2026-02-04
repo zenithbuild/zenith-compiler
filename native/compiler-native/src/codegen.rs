@@ -5,16 +5,17 @@
 
 use crate::jsx_lowerer::{JsxLowerer, ScriptRenamer};
 use crate::validate::{AttributeValue, ElementNode, ExpressionInput, StyleIR, TemplateNode};
+#[cfg(feature = "napi")]
 use napi_derive::napi;
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::{ast::*, AstBuilder};
-use oxc_ast_visit::VisitMut;
+use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, SPAN};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INPUT/OUTPUT TYPES
@@ -31,7 +32,13 @@ pub struct CodegenInput {
     pub location: String,
     pub nodes: Vec<TemplateNode>,
     #[serde(default)]
-    pub page_bindings: Vec<String>, // Page-level state bindings (extracted before component inlining)
+    pub page_bindings: Vec<String>, // Page-level state bindings
+    #[serde(default)]
+    pub page_props: Vec<String>, // Page-level prop bindings
+    #[serde(default)]
+    pub all_states: HashMap<String, String>,
+    #[serde(default)]
+    pub locals: Vec<String>, // Component-level local variables (const, let, var, function)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +49,7 @@ pub struct StateDeclaration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCode {
     pub expressions: String,
@@ -53,10 +60,11 @@ pub struct RuntimeCode {
     pub state_init: String,
     pub bundle: String,
     pub npm_imports: Vec<ScriptImport>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptImport {
     pub source: String,
@@ -69,14 +77,23 @@ pub struct ScriptImport {
 // NAPI EXPORT
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn generate_runtime_code(input_json: String) -> napi::Result<RuntimeCode> {
     let input: CodegenInput = serde_json::from_str(&input_json)
         .map_err(|e| napi::Error::from_reason(format!("Failed to parse input: {}", e)))?;
 
-    Ok(generate_runtime_code_internal(input))
+    let result = generate_runtime_code_internal(input);
+    if !result.errors.is_empty() {
+        return Err(napi::Error::from_reason(format!(
+            "Zenith Compilation Failed:\n{}",
+            result.errors.join("\n")
+        )));
+    }
+    Ok(result)
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn generate_codegen_intent() -> String {
     "Rust Codegen Authority".to_string()
@@ -88,93 +105,120 @@ pub fn generate_codegen_intent() -> String {
 
 pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let allocator = Allocator::default();
-    let source_type = SourceType::default()
-        .with_jsx(true)
-        .with_typescript(true)
-        .with_module(true);
+    let mut source_type = SourceType::default();
+    source_type = source_type.with_typescript(true);
+    source_type = source_type.with_jsx(true);
+    source_type = source_type.with_module(true);
 
     // 1. Replace "state " with "let " for parsing
     // Only match 'state' at statement boundaries (start, newline, semicolon, braces)
     // Avoid matching 'state' in comments or strings
-    let state_re = Regex::new(r"(^|[\n;{}])\s*state\s+").unwrap();
-    let parsable_script = state_re
-        .replace_all(&input.script_content, "$1 let ")
-        .to_string();
+    let state_re = Regex::new(r"state(\s+)").unwrap();
+    // 2. Extract state and prop bindings using Regex
+    let mut state_bindings = HashSet::new();
+    let mut prop_bindings = HashSet::new();
 
-    // 2. Extract state bindings using Regex (more robust than parsing substituted script)
-    // Only match 'state' at statement boundaries to avoid comments
-    let mut bindings = HashSet::new();
-    let state_decl_re = Regex::new(r"(?:^|[\n;{}])\s*state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
-    for cap in state_decl_re.captures_iter(&input.script_content) {
-        bindings.insert(cap[1].to_string());
+    let state_decl_re = Regex::new(r"(?m)^\s*state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
+    let prop_decl_re = Regex::new(r"(?m)^\s*prop\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
+
+    // Merge page-level bindings
+    if !input.page_bindings.is_empty() {
+    } else {
     }
 
-    // Merge page-level bindings (extracted BEFORE component inlining)
     for pb in &input.page_bindings {
-        bindings.insert(pb.clone());
+        state_bindings.insert(pb.clone());
     }
+    for pp in &input.page_props {
+        prop_bindings.insert(pp.clone());
+    }
+
+    let prop_re = Regex::new(r"prop(\s+)").unwrap();
+    let parsable_script = state_re
+        .replace_all(&input.script_content, "let$1")
+        .to_string();
+    let parsable_script = prop_re.replace_all(&parsable_script, "let$1").to_string();
 
     let mut state_decls = Vec::new();
     let parser = Parser::new(&allocator, &parsable_script, source_type);
     let ret = parser.parse();
 
+    if !ret.errors.is_empty() {
+        // eprintln!("[Zenith CODEGEN] Oxc Parse Errors: {:?}", ret.errors);
+    }
+
+    // 3. Extract default values from AST (where possible)
     let mut found_bindings = HashSet::new();
     for stmt in &ret.program.body {
         if let Statement::VariableDeclaration(var_decl) = stmt {
             for decl in &var_decl.declarations {
                 if let BindingPattern::BindingIdentifier(id) = &decl.id {
                     let name = id.name.to_string();
-                    let in_bindings = bindings.contains(&name);
-                    if in_bindings {
+                    if state_bindings.contains(&name) {
                         found_bindings.insert(name.clone());
-
-                        if let Some(init) = &decl.init {
+                        let init_code = if let Some(init) = &decl.init {
+                            // Extract initialization expression
+                            // This gives us "10" from "let count = 10"
                             let span = init.span();
-                            let init_code =
-                                &parsable_script[span.start as usize..span.end as usize];
-                            state_decls.push(StateDeclaration {
-                                name: name.clone(),
-                                initial_value: init_code.to_string(),
-                            });
+                            parsable_script[span.start as usize..span.end as usize].to_string()
                         } else {
-                            state_decls.push(StateDeclaration {
-                                name: name.clone(),
-                                initial_value: "undefined".to_string(),
-                            });
-                        }
+                            "undefined".to_string()
+                        };
+                        state_decls.push(StateDeclaration {
+                            name,
+                            initial_value: init_code,
+                        });
                     }
                 }
             }
         }
     }
 
-    // Fallback: use regex to find any bindings that AST missed
-    // This handles cases where state declarations are deeper in the script after component merging
-    for binding in &bindings {
+    // 4. Fallback for uninitialized bindings or failed AST extraction
+    for binding in &state_bindings {
         if !found_bindings.contains(binding) && binding != "state" {
-            // Try to find 'state BINDING = VALUE' or 'let BINDING = VALUE' in original/parsable script
+            // Priority 1: Use pre-collected value from all_states
+            if let Some(val) = input.all_states.get(binding) {
+                state_decls.push(StateDeclaration {
+                    name: binding.clone(),
+                    initial_value: val.clone(),
+                });
+                found_bindings.insert(binding.clone());
+                continue;
+            }
+
+            // Priority 2: Try to find 'state BINDING = VALUE' or 'let BINDING = VALUE' in original/parsable script
+            // Using Regex as backup if Oxc failed (e.g. syntax errors elsewhere)
             let pattern = format!(r"(?:state|let)\s+{}\s*=\s*([^;]+)", regex::escape(binding));
             if let Ok(re) = Regex::new(&pattern) {
                 if let Some(cap) = re.captures(&input.script_content) {
-                    let initial_value = cap[1].trim().to_string();
+                    let val = cap[1].trim().to_string();
                     state_decls.push(StateDeclaration {
                         name: binding.clone(),
-                        initial_value,
+                        initial_value: val,
                     });
-                } else {
-                    // No init found, use undefined
-                    state_decls.push(StateDeclaration {
-                        name: binding.clone(),
-                        initial_value: "undefined".to_string(),
-                    });
+                    found_bindings.insert(binding.clone());
+                    continue;
                 }
+            }
+
+            // Final: undefined
+            if !found_bindings.contains(binding) {
+                state_decls.push(StateDeclaration {
+                    name: binding.clone(),
+                    initial_value: "undefined".to_string(),
+                });
             }
         }
     }
 
     // 3. Transform script with identifier renaming and HOIST IMPORTS
+
     let parser = Parser::new(&allocator, &parsable_script, source_type);
-    let mut program = parser.parse().program;
+    let parser_ret = parser.parse();
+
+    let mut program = parser_ret.program;
+
     let ast = AstBuilder::new(&allocator);
 
     // Separate imports from body
@@ -185,8 +229,22 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let mut imported_identifiers = HashSet::new();
     let mut script_locals = HashSet::new();
 
+    // Merge component-level locals from input (e.g., pageTitle from layout)
+    // These are extracted by discovery.rs and passed through from TypeScript
+    for local in &input.locals {
+        script_locals.insert(local.clone());
+    }
+
     for stmt in program.body.into_iter() {
         if let Statement::ImportDeclaration(mut import_decl) = stmt {
+            let source = import_decl.source.value.to_string();
+            if source.ends_with(".zen") {
+                // Zenith architectural decision: Components are compile-time structural declarations.
+                // ESM imports of .zen files in the script are stripped to prevent runtime resolution errors.
+                // Component tags are resolved and inlined during the expansion phase.
+                continue;
+            }
+
             // Collect imported identifiers to prevent renaming them as state
             if let Some(specifiers) = &import_decl.specifiers {
                 for specifier in specifiers {
@@ -204,22 +262,10 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 }
             }
 
-            // Fix .zen extensions
-            let source = import_decl.source.value.to_string();
-            let final_source = if source.ends_with(".zen") {
-                source.replace(".zen", ".js")
-            } else {
-                source
-            };
-
             // Capture info BEFORE moving import_decl
             let is_type = import_decl.import_kind.is_type();
             let is_side_effect = import_decl.specifiers.is_none();
-            let source_for_struct = final_source.clone();
-
-            if final_source != import_decl.source.value.to_string() {
-                import_decl.source.value = allocator.alloc_str(&final_source).into();
-            }
+            let source_for_struct = source.clone();
 
             let import_code = Codegen::new()
                 .build(&Program {
@@ -264,8 +310,8 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
                 for d in &decl.declarations {
                     if let BindingPattern::BindingIdentifier(id) = &d.id {
                         let name = id.name.to_string();
-                        // Only add to locals if NOT a state binding
-                        if !bindings.contains(&name) {
+                        // Only add to locals if NOT a state or prop binding
+                        if !state_bindings.contains(&name) && !prop_bindings.contains(&name) {
                             script_locals.insert(name);
                         }
                     }
@@ -348,22 +394,40 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     }
     program.body = script_body_no_env;
 
-    let mut renamer =
-        ScriptRenamer::with_locals(&allocator, bindings.clone(), imported_identifiers.clone());
-    renamer.visit_program(&mut program);
-    let script_no_imports = Codegen::new().build(&program).code;
+    let mut all_errors = Vec::new();
+    let mut local_vars = HashSet::new();
+    local_vars.insert("stores".to_string());
+    local_vars.insert("loaderData".to_string());
+    local_vars.insert("query".to_string());
+    local_vars.insert("params".to_string());
 
+    // 3. (Continued) Final script and imports
+    let mut renamer = ScriptRenamer::with_categories(
+        &allocator,
+        state_bindings.clone(),
+        prop_bindings.clone(),
+        script_locals.clone(),
+        local_vars.clone(),
+    );
+    renamer.allow_prop_fallback = false; // Script context: Strict resolution
+                                         // Imports are real JS locals in this scope
+    for imp in &imported_identifiers {
+        renamer.add_local(imp.clone());
+    }
+    renamer.visit_program(&mut program);
+    all_errors.extend(renamer.errors);
+
+    let script_no_imports = Codegen::new().build(&program).code;
     let all_imports = import_lines.join("");
 
-    // 4. Prepare state variables set for expression transformation
-    // Include both regex-extracted bindings AND AST-extracted state_decls names
-    let mut state_vars = bindings.clone();
+    // 4. Prepare binding categories for expression transformation
+    let mut state_vars = state_bindings.clone();
     for sd in &state_decls {
         state_vars.insert(sd.name.clone());
     }
-    state_vars.insert("props".to_string());
-    state_vars.insert("stores".to_string());
-    state_vars.insert("loaderData".to_string());
+
+    let mut prop_vars = prop_bindings.clone();
+    prop_vars.insert("props".to_string()); // Legacy support for props object
 
     let loop_vars: HashSet<String> = input.template_bindings.iter().cloned().collect();
 
@@ -386,58 +450,100 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         template_ir
     );
 
+    // 5.5 Detect Event Handler Expression IDs (Phase A8)
+    let mut event_handler_ids = HashSet::new();
+    collect_event_handler_ids(&input.nodes, &mut event_handler_ids);
+
     // 6. Generate Expression Wrappers
+    let expression_deps = std::cell::RefCell::new(HashMap::new());
     let expressions_code = input
         .expressions
         .iter()
         .map(|expr| {
             let mut all_locals: HashSet<String> = loop_vars.clone();
-            for local in &script_locals {
-                all_locals.insert(local.clone());
-            }
             for imp in &imported_identifiers {
                 all_locals.insert(imp.clone());
             }
-            let (transformed_code, _deps, uses_loop) =
-                compute_expression_intent(expr, &state_vars, &all_locals);
+
+            let mut expression_locals = local_vars.clone();
+            for loc in &script_locals {
+                expression_locals.insert(loc.clone());
+            }
+
+            let is_event_handler = event_handler_ids.contains(&expr.id);
+            let (transformed_code, state_deps, uses_loop, expr_errors, mutated_deps) = compute_expression_intent(
+                expr,
+                &state_vars,
+                &prop_vars,
+                &expression_locals,
+                &local_vars,
+                &all_locals,
+                is_event_handler,
+            );
+            all_errors.extend(expr_errors);
+            expression_deps.borrow_mut().insert(expr.id.clone(), state_deps);
+
+            // Phase 6: Wrap expressions with notification for mutated deps
+            let mut final_code = transformed_code.trim_end_matches(';').to_string();
+            if !mutated_deps.is_empty() {
+                let notifications: Vec<String> = mutated_deps.iter()
+                    .map(|d| format!("window.zenithNotify(scope, 'state', '{}');", d))
+                    .collect();
+                final_code = format!("(() => {{ const __v = ({});\n  {};\n  return __v; }})()", final_code, notifications.join("\n  "));
+            } else {
+                final_code = format!("({});", final_code);
+            }
 
             let args = if uses_loop {
-                "state, item, index, array, globalState"
+                "scope, item, index, array"
             } else {
-                "state"
+                "scope"
             };
 
             let fn_name = format!("_expr_{}", expr.id);
             format!(
                 "function {}({}) {{
   try {{
-    const v = ({});
+    const v = {};
     return (v && typeof v === 'function' && v._isSignal) ? v() : (v === undefined ? '' : (Number.isNaN(v) ? 0 : v));
   }} catch (e) {{
-    console.error('[Zenith Runtime] Expression {} failed:', e);
+    const errorMsg = `[Zenith Runtime] Expression {} failed: ${{e.message}}`;
+    console.error(errorMsg);
+    // Placeholder for Z-ERR-UNRESOLVED-IDENT
+    if (e instanceof ReferenceError) {{
+       console.warn('[Z-ERR-UNRESOLVED-IDENT] Identifier in expression might be missing from scope:', e.message);
+    }}
     return '';
   }}
 }}",
                 fn_name,
                 args,
-                transformed_code.trim_end_matches(';'),
+                final_code,
                 expr.id
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    // 7. Expression Registry
     let expression_registry = if input.expressions.is_empty() {
         "// No expressions to register".to_string()
     } else {
+        let deps_map = expression_deps.into_inner();
         let entries: Vec<String> = input
             .expressions
             .iter()
             .map(|e| {
+                let deps = deps_map.get(&e.id).cloned().unwrap_or_default();
+                let deps_js = format!(
+                    "[{}]",
+                    deps.iter()
+                        .map(|d| format!("'{}'", d))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 format!(
-                    "  window.__ZENITH_EXPRESSIONS__.set('{}', _expr_{});",
-                    e.id, e.id
+                    "  window.__ZENITH_EXPRESSIONS__.set('{}', {{ fn: _expr_{}, deps: {} }});",
+                    e.id, e.id, deps_js
                 )
             })
             .collect();
@@ -469,7 +575,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         .collect();
 
     let reactive_state_init = format!(
-        "const state = __ZENITH_RUNTIME__.zenState({{\n{}\n}});\n  const __defaultState = state;",
+        "const state = __ZENITH_RUNTIME__.zenState({{\n{}\n}});\n  const __defaultState = state;\n  const props = {{}};\n  const locals = {{}};\n  const scope = {{ state, props, locals }};",
         state_props.join(",\n")
     );
 
@@ -477,7 +583,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     let hydration = include_str!("hydration_runtime.js");
 
     // 11. Bundle construction
-    let bundle = format!(
+    let bundle_code = format!(
         r#"
 {}
 // [ZENITH-NATIVE] Rust Compiler Authority Bundle
@@ -491,6 +597,7 @@ if (typeof window !== 'undefined') {{
     zenSignal, zenState, zenEffect, zenMemo, zenRef, zenOnMount, zenOnUnmount, zenBatch, zenUntrack 
   }} = window.__ZENITH_RUNTIME__;
   const __zenith = window.__zenith;
+  if (!window.__ZENITH_SCOPES__) window.__ZENITH_SCOPES__ = {{}};
   
   // Zenith standard aliases
   const ref = zenSignal;
@@ -527,8 +634,7 @@ if (typeof window !== 'undefined') {{
   }}
 
   // 9. Template IR
-  const canonicalIR = (s) => {{
-    const state = s || __defaultState;
+  const canonicalIR = (scope) => {{
     return {};
   }};
   window.canonicalIR = canonicalIR;
@@ -536,8 +642,16 @@ if (typeof window !== 'undefined') {{
   // 10. Hydration
   function initHydration() {{
     if (typeof window.zenithHydrate === 'function') {{
-      window.zenithHydrate(state, document);
+      window.zenithHydrate(state, document, locals);
     }}
+    
+    // Initialize components
+    if (window.__ZENITH_SCOPES__) {{
+        Object.values(window.__ZENITH_SCOPES__).forEach(s => {{
+            if (typeof s.__run === 'function') s.__run();
+        }});
+    }}
+
     if (window.__zenith && window.__zenith.triggerMount) {{
       window.__zenith.triggerMount(__instance);
     }}
@@ -573,8 +687,9 @@ if (typeof window !== 'undefined') {{
         styles: styles_code,
         script: script_no_imports,
         state_init: state_init_code,
-        bundle,
+        bundle: bundle_code,
         npm_imports: script_imports,
+        errors: all_errors,
     }
 }
 
@@ -585,12 +700,12 @@ if (typeof window !== 'undefined') {{
 fn get_node_args(node_loop_context: &Option<crate::validate::LoopContext>) -> String {
     if let Some(lc) = node_loop_context {
         if lc.variables.is_empty() {
-            "state".to_string()
+            "scope".to_string()
         } else {
-            format!("state, {}", lc.variables.join(", "))
+            format!("scope, {}", lc.variables.join(", "))
         }
     } else {
-        "state".to_string()
+        "scope".to_string()
     }
 }
 
@@ -605,8 +720,19 @@ fn generate_template_ir(node: &TemplateNode, expressions: &[ExpressionInput]) ->
                 .map(|ex| ex.id.clone())
                 .unwrap_or_else(|| format!("inline_{}", e.expression.len()));
             let args = get_node_args(&e.loop_context);
-            format!("() => (_expr_{}({}))", expr_id, args)
+
+            // HEAD EXPRESSIONS: If in <head>, execute the expression immediately during render
+            // This ensures the value is baked into the HTML as a static string, with no runtime/hydration placeholder.
+            if e.is_in_head {
+                return format!("(_expr_{}({}))", expr_id, args);
+            }
+
+            format!(
+                "{{ fn: () => (_expr_{}({})), id: '{}' }}",
+                expr_id, args, expr_id
+            )
         }
+
         TemplateNode::LoopFragment(loop_node) => {
             let body_ir: Vec<String> = loop_node
                 .body
@@ -722,7 +848,24 @@ fn generate_template_ir(node: &TemplateNode, expressions: &[ExpressionInput]) ->
                 }
             )
         }
-        TemplateNode::Component(c) => format!("/* Component {} */\"\"", c.name),
+        TemplateNode::Component(c) => {
+            // Unresolved components (like DefaultLayout) should at least render their children
+            // so that the content they wrap is not lost.
+            if c.children.is_empty() {
+                format!("/* Component {} */\"\"", c.name)
+            } else {
+                let child_irs: Vec<String> = c
+                    .children
+                    .iter()
+                    .map(|n| generate_template_ir(n, expressions))
+                    .collect();
+                format!(
+                    "/* Component {} */window.__zenith.fragment([{}])",
+                    c.name,
+                    child_irs.join(", ")
+                )
+            }
+        }
         TemplateNode::Doctype(_) => "\"\"".to_string(),
     }
 }
@@ -770,6 +913,12 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
                 _ => {
                     // Standard attribute handling
                     let mut p_name = attr.name.clone();
+
+                    // Normalize "on:click" -> "onclick"
+                    if p_name.starts_with("on:") {
+                        p_name = format!("on{}", &p_name[3..]);
+                    }
+
                     let val = match &attr.value {
                         AttributeValue::Static(s) => {
                             // If it's a standard event handler, wrap it as a function call
@@ -780,7 +929,16 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
                             }
                         }
                         AttributeValue::Dynamic(expr) => {
-                            format!("() => (_expr_{}({}))", expr.id, args)
+                            if p_name.starts_with("on") {
+                                // Event Handler: Return function directly
+                                format!("() => (_expr_{}({}))", expr.id, args)
+                            } else {
+                                // Reactive Attribute: Return wrapper
+                                format!(
+                                    "{{ fn: () => (_expr_{}({})), id: '{}' }}",
+                                    expr.id, args, expr.id
+                                )
+                            }
                         }
                     };
                     (p_name, val)
@@ -817,8 +975,12 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
 fn compute_expression_intent(
     expr: &ExpressionInput,
     state_bindings: &HashSet<String>,
+    prop_bindings: &HashSet<String>,
+    local_bindings: &HashSet<String>,
+    external_locals: &HashSet<String>,
     loop_vars: &HashSet<String>,
-) -> (String, Vec<String>, bool) {
+    is_event_handler: bool,
+) -> (String, Vec<String>, bool, Vec<String>, Vec<String>) {
     let allocator = Allocator::default();
     let source_type = SourceType::default().with_jsx(true).with_typescript(true);
     let code = &expr.code;
@@ -831,7 +993,7 @@ fn compute_expression_intent(
     let ret = parser.parse();
     if !ret.errors.is_empty() {
         // Fallback to original code if parsing fails (e.g. fragment bits)
-        return (code.clone(), vec![], uses_loop);
+        return (code.clone(), vec![], uses_loop, vec![], vec![]);
     }
 
     let mut program = ret.program;
@@ -840,22 +1002,29 @@ fn compute_expression_intent(
     let mut jsx_lowerer = JsxLowerer::new(&allocator);
     jsx_lowerer.visit_program(&mut program);
 
-    // 2. Rename identifiers (state.count, local vars)
-    let mut locals: HashSet<String> = HashSet::new();
-
-    // Add loop variables from context (e.g., item, index)
+    let mut renamer = ScriptRenamer::with_categories(
+        &allocator,
+        state_bindings.clone(),
+        prop_bindings.clone(),
+        local_bindings.clone(),
+        external_locals.clone(),
+    );
+    renamer.allow_prop_fallback = false; // Strict Enforcement: Disallow fallback for root-level identifiers
+                                         // Add loop variables from context as true JS locals
     if let Some(lc) = &expr.loop_context {
         for v in &lc.variables {
-            locals.insert(v.clone());
+            renamer.add_local(v.clone());
         }
     }
-
-    // Add known loop vars from the loop_vars set (passed from parent)
     for v in loop_vars {
-        locals.insert(v.clone());
+        renamer.add_local(v.clone());
     }
+    renamer.visit_program(&mut program);
 
-    let mut renamer = ScriptRenamer::with_locals(&allocator, state_bindings.clone(), locals);
+    if is_event_handler {
+        renamer.is_event_handler = true;
+    }
+    // Re-visit for the new enforcement logic (VisitMut is idempotent for renaming)
     renamer.visit_program(&mut program);
 
     // Codegen the transformed expression
@@ -863,14 +1032,57 @@ fn compute_expression_intent(
     // Trim trailing whitespace and SEMICOLONS (Expressions in Zenith should not have them internally)
     transformed = transformed.trim().trim_end_matches(';').to_string();
 
-    // Collect dependencies (state variables actually used)
-    let deps: Vec<String> = state_bindings
-        .iter()
-        .filter(|v| transformed.contains(&format!("state.{}", v)))
-        .cloned()
-        .collect();
+    if transformed.contains("docsOrder") || transformed.contains("render") {
+        panic!(
+            "\n\n[DEBUG PANIC] Found target code!\nCode: {}\nTransformed: {}\n\n",
+            expr.code, transformed
+        );
+    }
 
-    (transformed, deps, uses_loop)
+    // Phase 5 Enhancement 3: Use direct dependency tracking from ScriptRenamer
+    // No more string matching - deps are collected during AST traversal
+    let deps: Vec<String> = renamer.state_deps.into_iter().collect();
+    let mutated = renamer.mutated_state_deps.into_iter().collect();
+
+    (transformed, deps, uses_loop, renamer.errors, mutated)
+}
+
+fn collect_event_handler_ids(nodes: &[TemplateNode], ids: &mut HashSet<String>) {
+    for node in nodes {
+        match node {
+            TemplateNode::Element(el) => {
+                for attr in &el.attributes {
+                    if attr.name.starts_with("on") || attr.name.starts_with("data-zen-") {
+                        if let AttributeValue::Dynamic(expr) = &attr.value {
+                            ids.insert(expr.id.clone());
+                        }
+                    }
+                }
+                collect_event_handler_ids(&el.children, ids);
+            }
+            TemplateNode::Component(c) => {
+                for attr in &c.attributes {
+                    if attr.name.starts_with("on") {
+                        if let AttributeValue::Dynamic(expr) = &attr.value {
+                            ids.insert(expr.id.clone());
+                        }
+                    }
+                }
+                collect_event_handler_ids(&c.children, ids);
+            }
+            TemplateNode::ConditionalFragment(cf) => {
+                collect_event_handler_ids(&cf.consequent, ids);
+                collect_event_handler_ids(&cf.alternate, ids);
+            }
+            TemplateNode::OptionalFragment(of) => {
+                collect_event_handler_ids(&of.fragment, ids);
+            }
+            TemplateNode::LoopFragment(lf) => {
+                collect_event_handler_ids(&lf.body, ids);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn escape_js_string(s: &str) -> String {
@@ -903,11 +1115,21 @@ mod tests {
         };
         let mut state_vars = HashSet::new();
         state_vars.insert("count".to_string());
-        let loop_vars = HashSet::new();
+        let comp_prop_bindings = HashSet::new();
+        let comp_local_bindings = HashSet::new();
 
-        let (code, deps, uses_loop) = compute_expression_intent(&expr, &state_vars, &loop_vars);
-        assert!(code.contains("state.count"));
+        let (code, deps, uses_loop, errors, _mutated) = compute_expression_intent(
+            &expr,
+            &state_vars,
+            &comp_prop_bindings,
+            &comp_local_bindings,
+            &HashSet::new(), // Component-level external locals
+            &HashSet::new(),
+            true, // Phase A7: Disallow reactive access in __run()
+        );
+        assert!(code.contains("scope.state.count"));
         assert!(deps.contains(&"count".to_string()));
         assert!(!uses_loop);
+        assert!(errors.is_empty());
     }
 }

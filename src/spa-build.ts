@@ -11,9 +11,8 @@
 import fs from "fs"
 import path from "path"
 // Import new compiler
-import { compileZen, compileZenSource } from "./index"
-import { discoverLayouts } from "./discovery/layouts"
-import { processLayout } from "./transform/layoutProcessor"
+import { compile } from "./index"
+// discoverLayouts removed - layouts are now components
 import {
   discoverPages,
   generateRouteDefinition,
@@ -49,21 +48,12 @@ async function compilePage(
   baseDir: string = process.cwd()
 ): Promise<CompiledPage> {
   try {
-    const layoutsDir = path.join(baseDir, 'app', 'layouts')
-    const layouts = discoverLayouts(layoutsDir)
-
     const source = fs.readFileSync(pagePath, 'utf-8')
 
-    // Find suitable layout
-    let processedSource = source
-    let layoutToUse = layouts.get('DefaultLayout')
-
-    if (layoutToUse) {
-      processedSource = processLayout(source, layoutToUse)
-    }
-
-    // Use new compiler pipeline on the processed source
-    const result = await compileZenSource(processedSource, pagePath)
+    // Use new unified compiler pipeline
+    const result = await compile(source, pagePath, {
+      // layout: layoutToUse
+    })
 
     if (!result.finalized) {
       throw new Error(`Compilation failed: No finalized output`)

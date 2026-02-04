@@ -33,7 +33,13 @@ import type { BundlePlan } from './ir/types'
  */
 export async function bundlePageScript(plan: BundlePlan): Promise<string> {
     // Virtual entry module ID
-    const VIRTUAL_ENTRY = '\0zenith:entry'
+    const VIRTUAL_ENTRY = '\0zenith:entry.tsx'
+    /*
+    console.log('[Zenith Bundler] Input entry length:', plan.entry.length)
+    if (plan.entry.length > 4000) {
+        console.log('[Zenith Bundler] Input entry tail:', plan.entry.slice(-200))
+    }
+    */
 
     // Build virtual modules map from plan
     const virtualModules = new Map<string, string>()
@@ -55,11 +61,11 @@ export async function bundlePageScript(plan: BundlePlan): Promise<string> {
             resolveId(source: string) {
                 // Virtual modules from plan
                 if (virtualModules.has(source)) {
-                    return { id: source, moduleSideEffects: false }
+                    return { id: source, moduleSideEffects: true }
                 }
                 // Special case: zenith:content namespace
                 if (source === 'zenith:content') {
-                    return { id: '\0zenith:content', moduleSideEffects: false }
+                    return { id: '\0zenith:content', moduleSideEffects: true }
                 }
                 return null
             },

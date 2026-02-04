@@ -3,6 +3,7 @@
 //! Port of finalizeOutput.ts to Rust.
 //! Generates final HTML+JS and validation.
 
+#[cfg(feature = "napi")]
 use napi_derive::napi;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,93 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::codegen::{generate_runtime_code_internal, CodegenInput, ScriptImport};
-use crate::validate::{ExpressionInput, LoopContext, LoopContextInput, ZenIR};
+use crate::validate::{ExpressionInput, LoopContextInput, ZenIR};
+
+/// Inject head directive elements into HTML <head> section at compile time
+fn inject_head_elements(
+    html: &str,
+    head: &crate::validate::HeadDirective,
+    props: &std::collections::HashMap<String, String>,
+) -> String {
+    use crate::static_eval::static_eval;
+
+    let mut injected = String::new();
+
+    // Inject title if present
+    // Inject title if present
+    if let Some(title) = &head.title {
+        // Title is already statically resolved in component.rs or transform.rs.
+        // We do strictly no runtime resolution here.
+        let resolved = title.clone();
+        injected.push_str(&format!("<title>{}</title>\n    ", resolved));
+    }
+
+    // Inject description meta tag if present
+    // Inject description meta tag if present
+    if let Some(desc) = &head.description {
+        let resolved = desc.clone();
+        injected.push_str(&format!(
+            r#"<meta name="description" content="{}" />"#,
+            resolved
+        ));
+        injected.push_str("\n    ");
+    }
+
+    // Inject additional meta tags
+    for meta in &head.meta {
+        if meta.name == Some("description".to_string()) {
+            // Already handled above
+            continue;
+        }
+        let content = meta.content.clone();
+
+        if let Some(name) = &meta.name {
+            injected.push_str(&format!(
+                r#"<meta name="{}" content="{}" />"#,
+                name, content
+            ));
+        } else if let Some(prop) = &meta.property {
+            injected.push_str(&format!(
+                r#"<meta property="{}" content="{}" />"#,
+                prop, content
+            ));
+        }
+        injected.push_str("\n    ");
+    }
+
+    // Inject link tags
+    for link in &head.links {
+        let mut link_tag = format!(r#"<link rel="{}" href="{}""#, link.rel, link.href);
+        if let Some(t) = &link.r#type {
+            link_tag.push_str(&format!(r#" type="{}""#, t));
+        }
+        link_tag.push_str(" />\n    ");
+        injected.push_str(&link_tag);
+    }
+
+    if injected.is_empty() {
+        return html.to_string();
+    }
+
+    // Find the </head> tag and inject before it
+    if let Some(idx) = html.to_lowercase().find("</head>") {
+        let mut result = html[..idx].to_string();
+        result.push_str(&injected);
+        result.push_str(&html[idx..]);
+        result
+    } else if let Some(idx) = html.to_lowercase().find("<head>") {
+        // Inject after <head>
+        let head_end = idx + 6;
+        let mut result = html[..head_end].to_string();
+        result.push_str("\n    ");
+        result.push_str(&injected);
+        result.push_str(&html[head_end..]);
+        result
+    } else {
+        // No head tag found, just return as-is
+        html.to_string()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,7 +107,7 @@ pub struct CompiledTemplate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualModule {
     pub id: String,
@@ -28,7 +115,7 @@ pub struct VirtualModule {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct BundlePlan {
     pub entry: String,
@@ -38,17 +125,45 @@ pub struct BundlePlan {
     pub virtual_modules: Vec<VirtualModule>,
 }
 
+/// Manifest export for the bundler's capability-based chunking.
+/// This is the Compiler → Bundler handshake contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
+#[serde(rename_all = "camelCase")]
+pub struct ZenManifestExport {
+    /// Entry point path
+    pub entry: String,
+    /// Pre-rendered HTML template
+    pub template: String,
+    /// Whether this page uses reactive state
+    pub uses_state: bool,
+    /// Whether this page has event handlers
+    pub has_events: bool,
+    /// Whether this page is fully static
+    pub is_static: bool,
+    /// CSS classes used by this page (for pruning)
+    pub css_classes: Vec<String>,
+    /// Required runtime capabilities (as strings for JS interop)
+    pub required_capabilities: Vec<String>,
+    /// Compiled script content (author code)
+    pub script: String,
+    /// Compiled expressions
+    pub expressions: String,
+    /// Compiled styles
+    pub styles: String,
+    /// NPM imports
+    pub npm_imports: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct FinalizedOutput {
     pub html: String,
-    pub js: String,
-    pub npm_imports: String,
-    pub styles: Vec<String>,
     pub has_errors: bool,
     pub errors: Vec<String>,
-    pub bundle_plan: Option<BundlePlan>,
+    /// Manifest for bundler's capability-based chunking
+    pub manifest: Option<ZenManifestExport>,
 }
 
 fn emit_imports(imports: &[ScriptImport]) -> String {
@@ -117,6 +232,114 @@ fn verify_no_raw_expressions(html: &str, file_path: &str) -> Vec<String> {
     errors
 }
 
+/// Internal finalize function for use by parse_full_zen_native
+pub fn finalize_output_internal(
+    ir: ZenIR,
+    compiled: CompiledTemplate,
+) -> Result<FinalizedOutput, String> {
+    // PHASE 3: Resolve HEAD_EXPR markers to static values
+    // Populate props from ir.all_states so static resolution has access to state values (legacy prop needed for inject_head_elements API)
+    let head_props: std::collections::HashMap<String, String> = ir.all_states.clone();
+    let mut resolved_html = compiled.html.clone();
+
+    // PHASE 3.5: Inject Head component content into HTML <head>
+    if let Some(ref head_directive) = ir.head_directive {
+        resolved_html = inject_head_elements(&resolved_html, head_directive, &head_props);
+    }
+
+    // Verify HTML (after HEAD_EXPR resolution)
+    let html_errors = verify_no_raw_expressions(&resolved_html, &ir.file_path);
+    if !html_errors.is_empty() {
+        return Ok(FinalizedOutput {
+            has_errors: true,
+            errors: html_errors,
+            html: String::new(),
+            manifest: None,
+        });
+    }
+
+    // Prepare Codegen Input
+    /*
+    eprintln!(
+        "[Zenith FINALIZE] IR script present: {}",
+        ir.script.is_some()
+    );
+    */
+    let script_content = ir
+        .script
+        .as_ref()
+        .map(|s| {
+            // eprintln!("[Zenith FINALIZE] Script length: {}", s.raw.len());
+            s.raw.clone()
+        })
+        .unwrap_or_default();
+
+    // Map expressions
+    let expressions: Vec<ExpressionInput> = ir
+        .template
+        .expressions
+        .iter()
+        .map(|e| ExpressionInput {
+            id: e.id.clone(),
+            code: e.code.clone(),
+            loop_context: e.loop_context.as_ref().map(|lc| LoopContextInput {
+                variables: lc.variables.clone(),
+                map_source: lc.map_source.clone(),
+            }),
+        })
+        .collect();
+
+    let codegen_input = CodegenInput {
+        file_path: ir.file_path.clone(),
+        script_content,
+        expressions,
+        styles: ir.styles.clone(),
+        template_bindings: vec![],
+        location: ir.file_path.clone(),
+        nodes: ir.template.nodes.clone(),
+        page_bindings: ir.page_bindings.clone(),
+        page_props: ir.page_props.clone(),
+        all_states: ir.all_states.clone(),
+        locals: vec![],
+    };
+
+    let runtime_code = generate_runtime_code_internal(codegen_input);
+    let final_imports = emit_imports(&runtime_code.npm_imports);
+
+    // Generate manifest for bundler
+    let is_static = !ir.uses_state && !ir.has_events && ir.all_states.is_empty();
+    let mut required_capabilities = vec!["core".to_string()];
+
+    if ir.uses_state || !ir.all_states.is_empty() {
+        required_capabilities.push("reactivity".to_string());
+    }
+    if ir.has_events || ir.uses_state || !ir.all_states.is_empty() {
+        required_capabilities.push("hydration".to_string());
+    }
+
+    let manifest = ZenManifestExport {
+        entry: ir.file_path.clone(),
+        template: resolved_html.clone(),
+        uses_state: ir.uses_state || !ir.all_states.is_empty(),
+        has_events: ir.has_events,
+        is_static,
+        css_classes: ir.css_classes.clone(),
+        required_capabilities,
+        script: runtime_code.script,
+        expressions: runtime_code.expressions,
+        styles: runtime_code.styles,
+        npm_imports: final_imports,
+    };
+
+    Ok(FinalizedOutput {
+        html: resolved_html,
+        has_errors: false,
+        errors: vec![],
+        manifest: Some(manifest),
+    })
+}
+
+#[cfg(feature = "napi")]
 #[napi]
 pub fn finalize_output_native(
     ir_json: serde_json::Value,
@@ -128,17 +351,24 @@ pub fn finalize_output_native(
     let compiled: CompiledTemplate = serde_json::from_value(compiled_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid CompiledTemplate: {}", e)))?;
 
-    // Verify HTML
-    let html_errors = verify_no_raw_expressions(&compiled.html, &ir.file_path);
+    // PHASE 3: Resolve HEAD_EXPR markers to static values
+    // Populate props from ir.all_states so static resolution has access to state values
+    let head_props: std::collections::HashMap<String, String> = ir.all_states.clone();
+    let mut resolved_html = compiled.html.clone();
+
+    // PHASE 3.5: Inject Head component content into HTML <head>
+    if let Some(ref head_directive) = ir.head_directive {
+        resolved_html = inject_head_elements(&resolved_html, head_directive, &head_props);
+    }
+
+    // Verify HTML (after HEAD_EXPR resolution)
+    let html_errors = verify_no_raw_expressions(&resolved_html, &ir.file_path);
     if !html_errors.is_empty() {
         return Ok(FinalizedOutput {
             has_errors: true,
             errors: html_errors,
             html: String::new(),
-            js: String::new(),
-            npm_imports: String::new(),
-            styles: vec![],
-            bundle_plan: None,
+            manifest: None,
         });
     }
 
@@ -169,49 +399,48 @@ pub fn finalize_output_native(
         script_content,
         expressions,
         styles: ir.styles,
-        template_bindings: vec![], // TODO: Extract bindings if needed? Codegen re-extracts?
-        location: ir.file_path.clone(), // Using file path as location
+        template_bindings: vec![],
+        location: ir.file_path.clone(),
         nodes: ir.template.nodes,
-        page_bindings: vec![], // Can be populated if needed
+        page_bindings: ir.page_bindings.clone(),
+        page_props: ir.page_props.clone(),
+        all_states: ir.all_states.clone(),
+        locals: vec![],
     };
 
     let runtime_code = generate_runtime_code_internal(codegen_input);
 
     let final_imports = emit_imports(&runtime_code.npm_imports);
 
-    // BundlePlan
-    let bundle_plan = if !runtime_code.npm_imports.is_empty() {
-        let entry_code = runtime_code.bundle.clone();
+    // Generate manifest for bundler
+    let is_static = !ir.uses_state && !ir.has_events && ir.all_states.is_empty();
+    let mut required_capabilities = vec!["core".to_string()];
 
-        let resolve_root = Path::new(&ir.file_path)
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_string_lossy()
-            .to_string();
+    if ir.uses_state || !ir.all_states.is_empty() {
+        required_capabilities.push("reactivity".to_string());
+    }
+    if ir.has_events || ir.uses_state || !ir.all_states.is_empty() {
+        required_capabilities.push("hydration".to_string());
+    }
 
-        Some(BundlePlan {
-            entry: entry_code,
-            platform: "browser".to_string(),
-            format: "esm".to_string(),
-            resolve_roots: vec![resolve_root],
-            virtual_modules: vec![
-                VirtualModule {
-                    id: "\0zenith:content".to_string(),
-                    code: "export const zenCollection = (typeof globalThis !== 'undefined' ? globalThis : window).zenCollection;".to_string(),
-                }
-            ]
-        })
-    } else {
-        None
+    let manifest = ZenManifestExport {
+        entry: ir.file_path.clone(),
+        template: resolved_html.clone(),
+        uses_state: ir.uses_state || !ir.all_states.is_empty(),
+        has_events: ir.has_events,
+        is_static,
+        css_classes: ir.css_classes.clone(),
+        required_capabilities,
+        script: runtime_code.script,
+        expressions: runtime_code.expressions,
+        styles: runtime_code.styles,
+        npm_imports: final_imports,
     };
 
     Ok(FinalizedOutput {
-        html: compiled.html,
-        js: runtime_code.bundle,
-        npm_imports: final_imports,
-        styles: compiled.styles,
+        html: resolved_html,
         has_errors: false,
         errors: vec![],
-        bundle_plan,
+        manifest: Some(manifest),
     })
 }

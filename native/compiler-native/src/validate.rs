@@ -1,3 +1,4 @@
+#[cfg(feature = "napi")]
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -16,6 +17,73 @@ pub const INV_ORPHAN_COMPOUND: &str = "INV007";
 pub const INV_NON_ENUMERABLE_JSX: &str = "INV008";
 pub const INV_UNREGISTERED_EXPRESSION: &str = "INV009";
 pub const INV_COMPONENT_PRECOMPILED: &str = "INV010";
+pub const INV_UNRESOLVED_IDENTIFIER: &str = "Z-ERR-SCOPE-002";
+pub const INV_LAYOUT_FORBIDDEN: &str = "Z-ERR-LAYOUT-FORBIDDEN";
+pub const INV_RUN_REACTIVE: &str = "Z-ERR-RUN-REACTIVE";
+pub const INV_REACTIVITY_BOUNDARY: &str = "Z-ERR-REACTIVITY-BOUNDARY";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCOPE BINDINGS (Phase 1: Identifier Inventory)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Represents the complete set of valid identifiers for a component instance.
+/// This is the source of truth for identifier classification.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeBindings {
+    /// State variable names (reactive, declared with `state`)
+    pub state_names: HashSet<String>,
+    /// Prop names (passed from parent, declared with `prop`)
+    pub prop_names: HashSet<String>,
+    /// Local variable names (const/let/function declarations)
+    pub local_names: HashSet<String>,
+}
+
+impl ScopeBindings {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create from existing HashSets
+    pub fn from_sets(
+        state_names: HashSet<String>,
+        prop_names: HashSet<String>,
+        local_names: HashSet<String>,
+    ) -> Self {
+        Self {
+            state_names,
+            prop_names,
+            local_names,
+        }
+    }
+
+    /// Returns the category for an identifier, or None if unresolved.
+    /// Classification priority: locals > state > props
+    pub fn classify(&self, name: &str) -> Option<IdentifierCategory> {
+        if self.local_names.contains(name) {
+            Some(IdentifierCategory::Local)
+        } else if self.state_names.contains(name) {
+            Some(IdentifierCategory::State)
+        } else if self.prop_names.contains(name) {
+            Some(IdentifierCategory::Prop)
+        } else {
+            None
+        }
+    }
+
+    /// Check if any bindings exist
+    pub fn is_empty(&self) -> bool {
+        self.state_names.is_empty() && self.prop_names.is_empty() && self.local_names.is_empty()
+    }
+}
+
+/// Classification of an identifier's binding category
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierCategory {
+    State,
+    Prop,
+    Local,
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GUARANTEES
@@ -41,6 +109,9 @@ fn get_guarantee(code: &str) -> &'static str {
             "All bindings must reference an ID that exists in the registry."
         }
         INV_COMPONENT_PRECOMPILED => "Component AST must be precompiled before instantiation.",
+        INV_LAYOUT_FORBIDDEN => "Layouts are deprecated. Use component wrapping instead.",
+        INV_RUN_REACTIVE => "Component __run() must not reference reactive state or props. Use effects or expressions for reactive behavior.",
+        INV_REACTIVITY_BOUNDARY => "Reactive state may only be read inside expressions. Reactive state may only be written inside event handlers.",
         _ => "Unknown invariant.",
     }
 }
@@ -50,7 +121,7 @@ fn get_guarantee(code: &str) -> &'static str {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 pub struct CompilerError {
     pub code: String,
     pub error_type: String,
@@ -96,7 +167,7 @@ impl CompilerError {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct SourceLocation {
     pub line: u32,
@@ -104,7 +175,7 @@ pub struct SourceLocation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[serde(rename_all = "camelCase")]
 pub struct LoopContext {
     pub variables: Vec<String>,
@@ -178,6 +249,9 @@ pub struct ExpressionNode {
     #[serde(default)]
     pub location: SourceLocation,
     pub loop_context: Option<LoopContext>,
+    /// If true, this expression is inside <head> and must be statically resolvable
+    #[serde(default)]
+    pub is_in_head: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,12 +338,45 @@ pub struct TemplateIR {
 pub struct ScriptIR {
     pub raw: String,
     pub attributes: HashMap<String, String>,
+    #[serde(default)]
+    pub states: HashMap<String, String>,
+    #[serde(default)]
+    pub props: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StyleIR {
     pub raw: String,
+}
+
+/// Meta tag for head directive
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaTag {
+    pub name: Option<String>,
+    pub property: Option<String>,
+    pub content: String,
+}
+
+/// Link tag for head directive
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkTag {
+    pub rel: String,
+    pub href: String,
+    #[serde(default)]
+    pub r#type: Option<String>,
+}
+
+/// Head directive for compile-time head element injection
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadDirective {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub meta: Vec<MetaTag>,
+    pub links: Vec<LinkTag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +386,26 @@ pub struct ZenIR {
     pub template: TemplateIR,
     pub script: Option<ScriptIR>,
     pub styles: Vec<StyleIR>,
+    #[serde(default)]
+    pub props: Vec<String>,
+    #[serde(default)]
+    pub page_bindings: Vec<String>,
+    #[serde(default)]
+    pub page_props: Vec<String>,
+    #[serde(default)]
+    pub all_states: HashMap<String, String>,
+    /// Head directive for compile-time <head> element injection
+    #[serde(default)]
+    pub head_directive: Option<HeadDirective>,
+    /// Whether this component/page uses reactive state
+    #[serde(default)]
+    pub uses_state: bool,
+    /// Whether this component/page has event handlers
+    #[serde(default)]
+    pub has_events: bool,
+    /// CSS class names used (for pruning)
+    #[serde(default)]
+    pub css_classes: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -335,6 +462,83 @@ fn check_node_for_unresolved_component(node: &TemplateNode, file: &str) -> Optio
         TemplateNode::LoopFragment(lf) => {
             for child in &lf.body {
                 if let Some(err) = check_node_for_unresolved_component(child, file) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Phase A6: Validate that no Layout components are used (layouts are now just components)
+fn validate_no_layouts(nodes: &[TemplateNode], file: &str) -> Option<CompilerError> {
+    for node in nodes {
+        if let Some(e) = check_node_for_layout(node, file) {
+            return Some(e);
+        }
+    }
+    None
+}
+
+fn check_node_for_layout(node: &TemplateNode, file: &str) -> Option<CompilerError> {
+    match node {
+        TemplateNode::Component(c) => {
+            // Detect Layout components by name pattern
+            if c.name.to_lowercase().contains("layout") {
+                return Some(CompilerError::with_details(
+                    INV_LAYOUT_FORBIDDEN,
+                    &format!("<{}> detected. Layouts are deprecated.", c.name),
+                    file,
+                    c.location.line,
+                    c.location.column,
+                    Some(format!("<{}>", c.name)),
+                    vec![
+                        "Use component wrapping instead of layouts.".to_string(),
+                        "Layouts are now just: <Component>children</Component>".to_string(),
+                    ],
+                ));
+            }
+            // Recurse into children
+            for child in &c.children {
+                if let Some(err) = check_node_for_layout(child, file) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TemplateNode::Element(e) => {
+            for child in &e.children {
+                if let Some(err) = check_node_for_layout(child, file) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TemplateNode::ConditionalFragment(cf) => {
+            for child in &cf.consequent {
+                if let Some(err) = check_node_for_layout(child, file) {
+                    return Some(err);
+                }
+            }
+            for child in &cf.alternate {
+                if let Some(err) = check_node_for_layout(child, file) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TemplateNode::OptionalFragment(of) => {
+            for child in &of.fragment {
+                if let Some(err) = check_node_for_layout(child, file) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TemplateNode::LoopFragment(lf) => {
+            for child in &lf.body {
+                if let Some(err) = check_node_for_layout(child, file) {
                     return Some(err);
                 }
             }
@@ -530,6 +734,7 @@ fn check_node_expressions(
 // NAPI ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn validate_ir(ir_json: String) -> Option<CompilerError> {
     let ir: ZenIR = match serde_json::from_str(&ir_json) {
@@ -548,6 +753,11 @@ pub fn validate_ir(ir_json: String) -> Option<CompilerError> {
     let file = &ir.file_path;
 
     if let Some(e) = validate_no_unresolved_components(&ir.template.nodes, file) {
+        return Some(e);
+    }
+
+    // Phase A6: Reject any Layout component usage
+    if let Some(e) = validate_no_layouts(&ir.template.nodes, file) {
         return Some(e);
     }
 

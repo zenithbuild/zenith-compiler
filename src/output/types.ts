@@ -32,3 +32,12 @@ export type LoopContext = {
   mapSource?: string   // The array being mapped, e.g., 'todoItems'
 }
 
+export type FinalizedOutput = {
+  html: string
+  js: string
+  npmImports: string
+  styles: string[]
+  hasErrors: boolean
+  errors: string[]
+  bundlePlan?: any
+}

@@ -1,52 +1,50 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { parseZenFile } from '../parseZenFile'
+
 export interface LayoutMetadata {
     name: string
     filePath: string
     props: string[]
-    states: Map<string, string>
+    states: Map<string, any>
     html: string
     scripts: string[]
     styles: string[]
 }
 
-let native: any
-try {
-    try {
-        native = require('../../native/compiler-native')
-    } catch {
-        native = require('../../native/compiler-native/index.js')
-    }
-} catch (e) {
-    // Bridge load handled elsewhere
-}
-
 /**
- * Discover layouts in a directory
+ * Discover layouts in a directory using standard file system walking
+ * and the unified native bridge for metadata.
  */
 export function discoverLayouts(layoutsDir: string): Map<string, LayoutMetadata> {
-    if (native && native.discoverLayoutsNative) {
-        try {
-            const raw = native.discoverLayoutsNative(layoutsDir)
-            const layouts = new Map<string, LayoutMetadata>()
-            for (const [name, metadata] of Object.entries(raw)) {
-                // Adjust for Rust's camelCase vs Map mapping if needed
-                const meta = metadata as any
+    const layouts = new Map<string, LayoutMetadata>()
+
+    if (!fs.existsSync(layoutsDir)) return layouts
+
+    const files = fs.readdirSync(layoutsDir)
+    for (const file of files) {
+        if (file.endsWith('.zen')) {
+            const fullPath = path.join(layoutsDir, file)
+            const name = path.basename(file, '.zen')
+
+            try {
+                // Call the "One True Bridge" in metadata mode
+                const ir = parseZenFile(fullPath, undefined, { mode: 'metadata' })
+
                 layouts.set(name, {
-                    name: meta.name,
-                    filePath: meta.filePath,
-                    props: meta.props,
-                    states: new Map(Object.entries(meta.states || {})),
-                    html: meta.html,
-                    scripts: meta.scripts,
-                    styles: meta.styles
+                    name,
+                    filePath: fullPath,
+                    props: ir.props || [],
+                    states: new Map(),
+                    html: ir.template.raw,
+                    scripts: ir.script ? [ir.script.content] : [],
+                    styles: ir.styles?.map((s: any) => s.raw) || []
                 })
+            } catch (e) {
+                console.error(`[Zenith Layout Discovery] Failed to parse layout ${file}:`, e)
             }
-            return layouts
-        } catch (error: any) {
-            console.warn(`[Zenith Native] Layout discovery failed for ${layoutsDir}: ${error.message}`)
         }
     }
 
-    return new Map<string, LayoutMetadata>()
+    return layouts
 }

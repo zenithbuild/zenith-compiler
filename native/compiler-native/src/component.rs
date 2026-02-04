@@ -1,4 +1,13 @@
+use crate::jsx_lowerer::ScriptRenamer;
 use crate::validate::{ExpressionIR, LoopContext, TemplateNode, ZenIR};
+#[cfg(feature = "napi")]
+use napi_derive::napi;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{Expression, PropertyKey, Statement};
+use oxc_ast_visit::VisitMut;
+use oxc_codegen::Codegen;
+use oxc_parser::Parser;
+use oxc_span::{SourceType, SPAN};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -18,6 +27,8 @@ pub struct ComponentIR {
     pub slots: Vec<SlotDefinition>,
     #[serde(default)]
     pub props: Vec<String>,
+    #[serde(default)]
+    pub states: HashMap<String, String>,
     #[serde(default)]
     pub styles: Vec<String>,
     #[serde(default)]
@@ -51,26 +62,9 @@ pub struct SourceLocation {
     pub column: u32,
 }
 
-// Ensure SourceLocation matches validate.rs if needed, but validate.rs defines it too.
-// If validte.rs defines SourceLocation, we should use it from there to avoid confusion?
-// validate.rs has SourceLocation. Let's use `crate::validate::SourceLocation` and remove local def if possible?
-// Local definition might be used by local structs.
-// But wait, validate.rs `TemplateNode` uses `crate::validate::SourceLocation`.
-// Our `ComponentIR` uses `SlotDefinition` which uses `SourceLocation`.
-// If we remove local `SourceLocation`, we must import validte `SourceLocation`.
-// But `SlotDefinition` is local.
-// Let's keep duplicate for now or better, use imported one.
-// Actually, let's just stick to fixing imports for now.
-
-use napi_derive::napi;
-use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, PropertyKey, Statement};
-use oxc_parser::Parser;
-use oxc_span::SourceType;
-
 // ... existing structs ...
 
-#[napi]
+#[cfg_attr(feature = "napi", napi)]
 #[derive(Default)]
 struct ResolutionContext {
     used_components: HashSet<String>,
@@ -78,8 +72,102 @@ struct ResolutionContext {
     collected_expressions: Vec<ExpressionIR>,
     components: HashMap<String, ComponentIR>,
     merged_script: String,
+    all_states: HashMap<String, String>,
+    all_props: HashSet<String>,
+    collected_imports: HashSet<String>,
+    file_path: String,
+    collected_errors: Vec<String>,
+    /// Head directive collected from Head component during resolution
+    head_directive: Option<crate::validate::HeadDirective>,
 }
 
+/// Internal component resolution for use by parse_full_zen_native
+pub fn resolve_components(
+    mut ir: ZenIR,
+    components_map: HashMap<String, serde_json::Value>,
+) -> Result<ZenIR, String> {
+    // Convert serde_json::Value to ComponentIR
+    let components: HashMap<String, ComponentIR> = components_map
+        .into_iter()
+        .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|c| (k, c)))
+        .collect();
+
+    let mut ctx = ResolutionContext {
+        components,
+        file_path: ir.file_path.clone(),
+        ..Default::default()
+    };
+
+    // Accumulate existing script and initial states
+    if let Some(script) = &ir.script {
+        ctx.merged_script = script.raw.clone();
+        for (k, v) in &script.states {
+            ctx.all_states.insert(k.clone(), v.clone());
+        }
+    }
+
+    // Resolve nodes
+    let resolved_nodes = resolve_nodes(ir.template.nodes, &mut ctx, 0);
+
+    ir.template.nodes = resolved_nodes;
+
+    // Append collected expressions
+    ir.template.expressions.extend(ctx.collected_expressions);
+
+    // Collect styles from components
+    let mut component_styles = Vec::new();
+    for name in &ctx.used_components {
+        if let Some(comp) = ctx.components.get(name) {
+            for style in &comp.styles {
+                component_styles.push(crate::validate::StyleIR { raw: style.clone() });
+            }
+        }
+    }
+    ir.styles.extend(component_styles);
+
+    // Generate scope registration for each instance
+    // (Handled internally by resolve_component_node)
+
+    // Update script - handle pages with no script initial tag
+    let mut final_script = String::new();
+    for import in &ctx.collected_imports {
+        final_script.push_str(import);
+        final_script.push('\n');
+    }
+    final_script.push_str(&ctx.merged_script);
+
+    if let Some(script) = &mut ir.script {
+        script.raw = final_script;
+        // Merge initial states from all components
+        for (k, v) in &ctx.all_states {
+            script.states.insert(k.clone(), v.clone());
+        }
+    } else if !final_script.is_empty() {
+        ir.script = Some(crate::validate::ScriptIR {
+            raw: final_script,
+            attributes: HashMap::new(),
+            states: ctx.all_states.clone(),
+            props: ctx.all_props.iter().cloned().collect(),
+        });
+    }
+
+    ir.page_bindings = ctx.all_states.keys().cloned().collect();
+    ir.page_props = ctx.all_props.into_iter().collect();
+    ir.all_states = ctx.all_states;
+    ir.head_directive = ctx.head_directive;
+
+    if !ctx.collected_errors.is_empty() {
+        return Err(format!(
+            "Zenith Component Expansion Failed in {}:\n{}",
+            ir.file_path,
+            ctx.collected_errors.join("\n")
+        ));
+    }
+
+    Ok(ir)
+}
+
+#[cfg(feature = "napi")]
 #[napi]
 pub fn resolve_components_native(ir_json: String, components_json: String) -> String {
     let mut ir: ZenIR = serde_json::from_str(&ir_json).expect("Failed to parse IR");
@@ -88,6 +176,7 @@ pub fn resolve_components_native(ir_json: String, components_json: String) -> St
 
     let mut ctx = ResolutionContext {
         components: components_map,
+        file_path: ir.file_path.clone(),
         ..Default::default()
     };
 
@@ -122,6 +211,8 @@ pub fn resolve_components_native(ir_json: String, components_json: String) -> St
         ir.script = Some(crate::validate::ScriptIR {
             raw: ctx.merged_script,
             attributes: HashMap::new(),
+            states: HashMap::new(),
+            props: Vec::new(),
         });
     }
 
@@ -169,7 +260,56 @@ fn resolve_component_node(
 ) -> Vec<TemplateNode> {
     let mut name = node.name.clone();
 
+    // PHASE 3: Handle virtual Head component for compile-time teleportation
+    if name == "Head" {
+        // Extract attributes for head directive
+        let mut head_directive = crate::validate::HeadDirective::default();
+
+        for attr in &node.attributes {
+            let value = match &attr.value {
+                crate::validate::AttributeValue::Static(s) => s.clone(),
+                crate::validate::AttributeValue::Dynamic(expr) => {
+                    // STRICT HEAD ENFORCEMENT
+                    // Attributes on <Head> component must be static.
+                    // Try to resolve using static_eval (with empty props for now - strict mode)
+                    let empty_props = std::collections::HashMap::new();
+                    // We need to resolve expression code.
+                    match crate::static_eval::static_eval(&expr.code, &empty_props) {
+                        Some(val) => val,
+                        None => {
+                            // FAIL HARD
+                            format!(
+                                "ZENITH_COMPILE_ERROR: Dynamic head attribute '{}' not allowed",
+                                expr.code
+                            )
+                        }
+                    }
+                }
+            };
+
+            match attr.name.as_str() {
+                "title" => head_directive.title = Some(value),
+                "description" => {
+                    head_directive.description = Some(value.clone());
+                    head_directive.meta.push(crate::validate::MetaTag {
+                        name: Some("description".to_string()),
+                        property: None,
+                        content: value,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Store the head directive in context for later injection
+        ctx.head_directive = Some(head_directive);
+
+        // Head component doesn't render inline - it teleports to <head>
+        return vec![];
+    }
+
     // Invariants check: try exact match first, then case-insensitive
+
     if !ctx.components.contains_key(&name) {
         let lower_name = name.to_lowercase();
         let mut found = false;
@@ -201,38 +341,43 @@ fn resolve_component_node(
     ctx.instance_counter += 1;
     let instance_suffix = format!("inst{}", instance_id);
 
-    let mut local_rename_map = HashMap::new();
+    // Categories for ScriptRenamer
+    let mut comp_state_bindings = HashSet::new();
+    let mut comp_prop_bindings = HashSet::new();
+    let mut comp_local_bindings = HashSet::new();
 
-    // Derive local symbols from script if present
-    // Note: We need to parse script to get local declarations if we want strict safety
-    // For now, if passed via ComponentIR we can use it?
-    // ComponentIR has `script`.
+    // 1. Initial categorization from metadata
+    for prop in &comp.props {
+        comp_prop_bindings.insert(prop.clone());
+    }
+    for (name, val) in &comp.states {
+        comp_state_bindings.insert(name.clone());
+        ctx.all_states.insert(name.clone(), val.clone());
+    }
+
+    for prop in &comp_prop_bindings {
+        ctx.all_props.insert(prop.clone());
+    }
+
+    // 2. Discover locals from script (all other symbols are locals)
     if let Some(script_content) = &comp.script {
-        // We should parse declarations.
-        // For now, let's assume we rename EVERYTHING in the map passed by JS or just discover?
-        // JS logic: getLocalDeclarations(script).
-        // We should implement get_local_declarations in Rust too using oxc.
-        let locals = get_local_declarations(script_content);
-        for local in locals {
-            if !comp.props.contains(&local) {
-                local_rename_map.insert(local.clone(), format!("{}_{}", local, instance_suffix));
+        let all_decls = get_local_declarations(script_content);
+        for decl in all_decls {
+            if !comp_prop_bindings.contains(&decl) && !comp_state_bindings.contains(&decl) {
+                comp_local_bindings.insert(decl);
             }
         }
     }
 
-    // Props substitution
-    let mut prop_substitution_map = HashMap::new();
+    // Map passed attributes to prop values for scope registration
+    let mut prop_vals = Vec::new();
     for attr in &node.attributes {
-        let replacement = match &attr.value {
-            crate::validate::AttributeValue::Static(s) => format!("\"{}\"", s), // Naive stringification
+        let val = match &attr.value {
+            crate::validate::AttributeValue::Static(s) => format!("\"{}\"", s),
             crate::validate::AttributeValue::Dynamic(expr) => format!("({})", expr.code),
         };
-        prop_substitution_map.insert(attr.name.clone(), replacement.clone());
-        prop_substitution_map.insert(format!("props.{}", attr.name), replacement);
+        prop_vals.push(format!("    \"{}\": {}", attr.name, val));
     }
-
-    let mut unified_rename_map = local_rename_map.clone();
-    unified_rename_map.extend(prop_substitution_map);
 
     let mut expression_id_map = HashMap::new();
 
@@ -240,50 +385,169 @@ fn resolve_component_node(
     for expr in &comp.expressions {
         let new_id = format!("{}_{}", expr.id, instance_suffix);
         expression_id_map.insert(expr.id.clone(), new_id.clone());
-        let renamed_code = rename_symbols_safe(&expr.code, &unified_rename_map);
+        let (renamed_code, _, expr_errors) = rename_symbols_safe(
+            &expr.code,
+            &comp_state_bindings,
+            &comp_prop_bindings,
+            &comp_local_bindings,
+            &HashSet::new(),
+            false, // Not in __run(), these are promoted expressions
+            false, // Template context: Strict mode (Phase 4) - NO fallback
+        );
+
+        if !expr_errors.is_empty() {
+            ctx.collected_errors.extend(expr_errors);
+        }
+
+        let final_code = renamed_code.replace(
+            "scope.",
+            &format!("window.__ZENITH_SCOPES__[\"{}\"].", instance_suffix),
+        );
 
         ctx.collected_expressions.push(ExpressionIR {
             id: new_id,
-            code: renamed_code,
+            code: final_code,
             location: expr.location.clone(),
-            loop_context: expr.loop_context.clone(), // Should we merge loop context here?
-                                                     // Component expressions effectively "hoisted" but they run in component scope.
-                                                     // When we inline, the code is renamed.
-                                                     // The loop context of the component usage site isn't relevant for the internal expression definition
-                                                     // UNLESS the prop passed in was using a loop var.
-                                                     // But here we are processing the *component's defined expressions*.
-                                                     // Their loop context is strictly internal to them.
+            loop_context: expr.loop_context.clone(),
         });
     }
 
-    // 4. Merge Script
-    if let Some(script_content) = &comp.script {
-        let renamed_script = rename_symbols_safe(script_content, &unified_rename_map);
-        ctx.merged_script.push_str("\n\n");
-        ctx.merged_script.push_str(&renamed_script);
+    // 4. Merge Script with Scope Registry + Execution Contract
+    let (renamed_script, script_imports, script_errors) = if let Some(script_content) = &comp.script
+    {
+        rename_symbols_safe(
+            script_content,
+            &comp_state_bindings,
+            &comp_prop_bindings,
+            &comp_local_bindings,
+            &HashSet::new(), // Component-level external locals (usually none)
+            true,            // Phase A7: Disallow reactive access in __run()
+            false,           // Script context: NO prop fallback
+        )
+    } else {
+        (String::new(), Vec::new(), Vec::new())
+    };
+
+    // Collect extracted imports
+    ctx.collected_imports.extend(script_imports);
+
+    // Phase A7: Hard enforcement of non-reactive __run()
+    if !script_errors.is_empty() {
+        ctx.collected_errors.extend(script_errors);
     }
+
+    /*
+    if ctx.file_path.contains("documentation") {
+        println!(
+            "\n\n[DEBUG DOCUMENTATION SCRIPT] File: {}\nRenamed Script:\n{}\n\n",
+            ctx.file_path, renamed_script
+        );
+    }
+    */
+
+    ctx.merged_script.push_str("\n\n");
+    ctx.merged_script
+        .push_str(&format!("// --- Instance {} ---\n{{\n", instance_suffix));
+
+    // 4a. Initialize state object (CRITICAL: must come before scope container)
+    // Build state initialization entries from component state bindings
+    let state_entries: Vec<String> = comp
+        .states
+        .iter()
+        .map(|(name, val)| format!("    \"{}\": {}", name, val))
+        .collect();
+
+    if state_entries.is_empty() {
+        ctx.merged_script
+            .push_str("  const __zen_store = __ZENITH_RUNTIME__.zenState({});\n");
+    } else {
+        ctx.merged_script.push_str(&format!(
+            "  const __zen_store = __ZENITH_RUNTIME__.zenState({{\n{}\n  }});\n",
+            state_entries.join(",\n")
+        ));
+    }
+
+    // 4b. Scope container (props populated FIRST - Phase A4 timing fix)
+    ctx.merged_script.push_str("  const __locals = {};\n");
+
+    ctx.merged_script.push_str(&format!(
+        "  const __props = __ZENITH_RUNTIME__.zenState({{\n{}\n  }});\n",
+        prop_vals.join(",\n")
+    ));
+    // List of effects to sync props from parent to child
+    let mut prop_sync_effects = Vec::new();
+
+    for (i, attr) in node.attributes.iter().enumerate() {
+        if let crate::validate::AttributeValue::Dynamic(expr) = &attr.value {
+            // Transform parent expression code in parent context
+            let (renamed, _, _) = rename_symbols_safe(
+                &expr.code,
+                &ctx.all_states.keys().cloned().collect(),
+                &ctx.all_props,
+                &HashSet::new(),
+                &HashSet::new(),
+                false,
+                true, // Use fallback for parent expressions in template
+            );
+
+            // Generate Effect to sync: parent_expr -> child_scope.props.name -> Notify
+            let effect_id = format!("prop_sync_{}_{}_{}", instance_suffix, attr.name, i);
+            let effect_js = format!(
+                "  __ZENITH_RUNTIME__.zenEffect(() => {{\n    __props[\"{}\"] = {};\n    __ZENITH_RUNTIME__.zenithNotify(__zen_inst_scope, 'props', \"{}\");\n  }}, {{ id: \"{}\" }});\n",
+                attr.name, renamed, attr.name, effect_id
+            );
+            prop_sync_effects.push(effect_js);
+        }
+    }
+
+    ctx.merged_script.push_str(&format!(
+        "  const __zen_inst_scope = window.__ZENITH_SCOPES__[\"{}\"] = {{ state: __zen_store, props: __props, locals: __locals }};\n",
+        instance_suffix
+    ));
+
+    // Inject Prop Sync Effects
+    for effect in prop_sync_effects {
+        ctx.merged_script.push_str(&effect);
+    }
+
+    // Destructuring removed to avoid 'state' variable name collision with codegen regex
+    // User code is already renamed to use scope.state, scope.props, scope.locals
+
+    // 4b. Execution Thunk (Phase A2 - Component Execution Contract)
+    // INVARIANT: Every resolved component instance MUST emit a __run() thunk.
+    // Even if no script, no state, no props - __run() still exists.
+
+    ctx.merged_script
+        .push_str(&format!("  __zen_inst_scope.__run = function() {{\n"));
+    ctx.merged_script
+        .push_str("    const scope = __zen_inst_scope;\n");
+    ctx.merged_script
+        .push_str("    const { state, props, locals } = scope;\n");
+    if renamed_script.trim().is_empty() {
+        ctx.merged_script
+            .push_str("    // No component script - empty execution thunk\n");
+    } else {
+        // Component script runs ONCE after mount (Phase A5 - GSAP compatibility)
+        // Z-ERR-RUN-REACTIVE: This is imperative-only, no reactive tracking
+        ctx.merged_script.push_str(
+            "    // Component script execution (runs once after mount, imperative-only)\n",
+        );
+        ctx.merged_script
+            .push_str(&format!("    {}\n", renamed_script.trim()));
+    }
+    ctx.merged_script.push_str("  };\n");
+    ctx.merged_script.push_str("}");
 
     // 5. Expand Template
     // Need to clone nodes first as we are mutating
     let mut template_nodes = comp.nodes.clone();
-
-    rewrite_node_expressions(&mut template_nodes, &expression_id_map, &unified_rename_map);
+    rewrite_node_expressions(&mut template_nodes, &expression_id_map);
     let resolved_template = resolve_slots(template_nodes, &slots);
-
-    // Attribute forwarding?
-    // forwardAttributesToRoot logic...
-    // Let's implement simpler forwarding logic or skip for now.
-    // Ideally we should forward `class`, `style` etc.
-    // For now, let's recurse.
 
     resolve_nodes(resolved_template, ctx, depth + 1)
 }
 
-fn rewrite_node_expressions(
-    nodes: &mut Vec<TemplateNode>,
-    id_map: &HashMap<String, String>,
-    rename_map: &HashMap<String, String>,
-) {
+fn rewrite_node_expressions(nodes: &mut Vec<TemplateNode>, id_map: &HashMap<String, String>) {
     for node in nodes {
         match node {
             TemplateNode::Expression(e) => {
@@ -295,73 +559,50 @@ fn rewrite_node_expressions(
             }
             TemplateNode::Element(elem) => {
                 for attr in &mut elem.attributes {
-                    // Event handlers are transformed to data-zen-* format by parseTemplate
-                    // Check for: data-zen-click, data-zen-change, data-zen-input, data-zen-submit
-                    let is_event_handler = attr.name == "data-zen-click"
-                        || attr.name == "data-zen-change"
-                        || attr.name == "data-zen-input"
-                        || attr.name == "data-zen-submit"
-                        || attr.name.starts_with("on"); // fallback for untransformed
-
                     match &mut attr.value {
                         crate::validate::AttributeValue::Dynamic(expr) => {
                             if let Some(new_id) = id_map.get(&expr.id) {
                                 expr.id = new_id.clone();
                             }
-                            expr.code = rename_symbols_safe(&expr.code, rename_map);
+                            // Symbol renaming in expr.code is now handled in resolve_component_node
+                            // using rename_symbols_safe before pushing to collected_expressions.
                         }
-                        crate::validate::AttributeValue::Static(value) => {
-                            // For event handlers, rename the function reference
-                            if is_event_handler {
-                                if let Some(new_name) = rename_map.get(value.as_str()) {
-                                    *value = new_name.clone();
-                                }
-                            }
-                        }
+                        _ => {}
                     }
                 }
-                rewrite_node_expressions(&mut elem.children, id_map, rename_map);
+                rewrite_node_expressions(&mut elem.children, id_map);
             }
             TemplateNode::Component(comp) => {
-                // Also rewrite component attributes
                 for attr in &mut comp.attributes {
-                    let is_event_handler = attr.name.starts_with("on");
                     match &mut attr.value {
                         crate::validate::AttributeValue::Dynamic(expr) => {
                             if let Some(new_id) = id_map.get(&expr.id) {
                                 expr.id = new_id.clone();
                             }
-                            expr.code = rename_symbols_safe(&expr.code, rename_map);
                         }
-                        crate::validate::AttributeValue::Static(value) => {
-                            if is_event_handler {
-                                if let Some(new_name) = rename_map.get(value.as_str()) {
-                                    *value = new_name.clone();
-                                }
-                            }
-                        }
+                        _ => {}
                     }
                 }
-                rewrite_node_expressions(&mut comp.children, id_map, rename_map);
+                rewrite_node_expressions(&mut comp.children, id_map);
             }
             TemplateNode::ConditionalFragment(cf) => {
                 if let Some(new_id) = id_map.get(&cf.condition) {
                     cf.condition = new_id.clone();
                 }
-                rewrite_node_expressions(&mut cf.consequent, id_map, rename_map);
-                rewrite_node_expressions(&mut cf.alternate, id_map, rename_map);
+                rewrite_node_expressions(&mut cf.consequent, id_map);
+                rewrite_node_expressions(&mut cf.alternate, id_map);
             }
             TemplateNode::LoopFragment(lf) => {
                 if let Some(new_id) = id_map.get(&lf.source) {
                     lf.source = new_id.clone();
                 }
-                rewrite_node_expressions(&mut lf.body, id_map, rename_map);
+                rewrite_node_expressions(&mut lf.body, id_map);
             }
             TemplateNode::OptionalFragment(of) => {
                 if let Some(new_id) = id_map.get(&of.condition) {
                     of.condition = new_id.clone();
                 }
-                rewrite_node_expressions(&mut of.fragment, id_map, rename_map);
+                rewrite_node_expressions(&mut of.fragment, id_map);
             }
             _ => {}
         }
@@ -540,8 +781,8 @@ fn resolve_slots(nodes: Vec<TemplateNode>, slots: &ResolvedSlots) -> Vec<Templat
                         _ => None,
                     });
 
-                if let Some(n) = name {
-                    if let Some(content) = slots.named.get(&n) {
+                if let Some(n) = &name {
+                    if let Some(content) = slots.named.get(n) {
                         resolved.extend(content.clone());
                         continue;
                     }
@@ -553,7 +794,15 @@ fn resolve_slots(nodes: Vec<TemplateNode>, slots: &ResolvedSlots) -> Vec<Templat
                     }
                 }
 
-                // Fallback content
+                // Z-ERR-ORPHAN-SLOT: Slot has no content provided and no fallback
+                if elem.children.is_empty() {
+                    eprintln!(
+                        "  [Z-ERR-ORPHAN-SLOT] Unresolved slot '{}'. Ensure children are provided or add fallback content.",
+                        name.as_deref().unwrap_or("default")
+                    );
+                }
+
+                // Fallback content (if any)
                 resolved.extend(resolve_slots(elem.children.clone(), slots));
             }
             TemplateNode::Element(mut elem) => {
@@ -570,63 +819,75 @@ fn resolve_slots(nodes: Vec<TemplateNode>, slots: &ResolvedSlots) -> Vec<Templat
 /// Robust symbol renaming using Oxc parser.
 /// Renames identifiers in `code` based on `rename_map`.
 /// Avoids renaming object properties (e.g. `obj.prop`).
-pub fn rename_symbols_safe(code: &str, rename_map: &HashMap<String, String>) -> String {
-    if rename_map.is_empty() {
-        return code.to_string();
+pub fn rename_symbols_safe(
+    code: &str,
+    state_bindings: &HashSet<String>,
+    prop_bindings: &HashSet<String>,
+    local_bindings: &HashSet<String>,
+    external_locals: &HashSet<String>,
+    disallow_reactive_access: bool,
+    allow_prop_fallback: bool,
+) -> (String, Vec<String>, Vec<String>) {
+    // (code, imports, errors)
+    /*
+    eprintln!("[Zenith RENAME] Input code: {}", code);
+    eprintln!("[Zenith RENAME] State: {:?}", state_bindings);
+    eprintln!("[Zenith RENAME] Props: {:?}", prop_bindings);
+    eprintln!("[Zenith RENAME] Locals: {:?}", local_bindings);
+    */
+    if state_bindings.is_empty() && prop_bindings.is_empty() && local_bindings.is_empty() {
+        return (code.to_string(), Vec::new(), Vec::new());
     }
 
-    // Preprocess: Replace "state " with "let " so Oxc can parse Zenith's custom keyword
-    let parsable_code = code.replace("state ", "let ");
-    let used_state_preprocessing = parsable_code != code;
+    // Preprocess: Replace "state " and "prop " with "let " so Oxc can parse Zenith's custom keywords
+    let parsable_code = code.replace("state ", "let ").replace("prop ", "let ");
+    let used_preprocessing = parsable_code != code;
 
     let allocator = Allocator::default();
     let source_type = SourceType::default()
         .with_module(true)
         .with_typescript(true)
         .with_jsx(true);
-    let ret = Parser::new(&allocator, &parsable_code, source_type).parse();
+    let mut ret = Parser::new(&allocator, &parsable_code, source_type).parse();
     if !ret.errors.is_empty() {
-        return code.to_string();
+        return (code.to_string(), Vec::new(), Vec::new());
     }
 
-    let program = ret.program;
+    let mut renamer = ScriptRenamer::with_categories(
+        &allocator,
+        state_bindings.clone(),
+        prop_bindings.clone(),
+        local_bindings.clone(),
+        external_locals.clone(),
+    );
+    renamer.disallow_reactive_access = disallow_reactive_access;
+    renamer.allow_prop_fallback = allow_prop_fallback;
+    renamer.visit_program(&mut ret.program);
 
-    // Collect (start, end, new_name) tuples for replacements
-    let mut replacements: Vec<(u32, u32, String)> = Vec::new();
+    let result = Codegen::new().build(&ret.program).code;
 
-    for stmt in program.body {
-        collect_replacements_stmt(&stmt, rename_map, &mut replacements);
-    }
-
-    // Sort reverse to apply safely
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut result = parsable_code.to_string();
-    for (start, end, replacement) in replacements {
-        result.replace_range((start as usize)..(end as usize), &replacement);
-    }
-
-    // Restore "state " keyword if we preprocessed it
-    if used_state_preprocessing {
-        result = result.replace("let ", "state ");
-    }
-
-    result
+    (result, renamer.collected_imports, renamer.errors)
 }
 
 fn get_local_declarations(script: &str) -> HashSet<String> {
-    // Preprocess: Replace "state " with "let " so Oxc can parse Zenith's custom keyword
-    let parsable_script = script.replace("state ", "let ");
+    // Preprocess: Replace "state " and "prop " with "let " so Oxc can parse Zenith's custom keywords
+    let parsable_script = script.replace("state ", "let ").replace("prop ", "let ");
 
     let allocator = Allocator::default();
     let source_type = SourceType::default()
         .with_module(true)
         .with_typescript(true)
         .with_jsx(true);
-    let ret = Parser::new(&allocator, &parsable_script, source_type).parse();
+
+    let parser = Parser::new(&allocator, &parsable_script, source_type);
+    let ret = parser.parse();
 
     let mut symbols = HashSet::new();
     if !ret.errors.is_empty() {
+        eprintln!("[Zenith ERROR] Failed to parse component script for local discovery:");
+        for err in &ret.errors {
+            eprintln!("  - {}", err.message);
+        }
         return symbols;
     }
 
@@ -1000,42 +1261,50 @@ mod tests {
 
     #[test]
     fn test_rename_symbols_simple() {
-        let code = "const a = 1; let b = 2; console.log(a, b);";
-        let mut map = HashMap::new();
-        map.insert("a".to_string(), "a_1".to_string());
-        map.insert("b".to_string(), "b_1".to_string());
+        let code = "const x = a + b;";
+        let mut state = HashSet::new();
+        let mut props = HashSet::new();
+        let locals = HashSet::new();
+        state.insert("a".to_string());
+        props.insert("b".to_string());
 
-        let renamed = rename_symbols_safe(code, &map);
-        assert!(renamed.contains("const a_1 = 1"));
-        assert!(renamed.contains("let b_1 = 2"));
-        assert!(renamed.contains("console.log(a_1, b_1)"));
+        let (renamed, _, _) =
+            rename_symbols_safe(code, &state, &props, &locals, &HashSet::new(), false, false);
+        assert!(renamed.contains("state.a"));
+        assert!(renamed.contains("props.b"));
     }
 
     #[test]
     fn test_rename_symbols_object_property() {
-        let code = "const a = 1; const obj = { a: a, b: 2 };";
-        let mut map = HashMap::new();
-        map.insert("a".to_string(), "a_1".to_string());
+        let code = "const obj = { a: a, b: 2 };";
+        let mut state = HashSet::new();
+        state.insert("a".to_string());
+        let props = HashSet::new();
+        let locals = HashSet::new();
 
-        let renamed = rename_symbols_safe(code, &map);
-
-        // Expected: const a_1 = 1; const obj = { a: a_1, b: 2 };
-        assert!(renamed.contains("const a_1 = 1"));
-        // Check that property key 'a' is preserved but value is renamed
-        // Regex to check structure approximately
-        assert!(renamed.contains("a: a_1"));
+        let (renamed, _, _) =
+            rename_symbols_safe(code, &state, &props, &locals, &HashSet::new(), false, false);
+        assert!(
+            renamed.contains("a: scope.state.a"),
+            "Expected scope.state.a but got: {}",
+            renamed
+        );
     }
 
     #[test]
     fn test_rename_symbols_shorthand() {
-        let code = "const a = 1; const obj = { a };";
-        let mut map = HashMap::new();
-        map.insert("a".to_string(), "a_1".to_string());
+        let code = "const obj = { a };";
+        let mut state = HashSet::new();
+        state.insert("a".to_string());
+        let props = HashSet::new();
+        let locals = HashSet::new();
 
-        let renamed = rename_symbols_safe(code, &map);
-
-        // Expected: const a_1 = 1; const obj = { a: a_1 };
-        assert!(renamed.contains("const a_1 = 1"));
-        assert!(renamed.contains("a: a_1"));
+        let (renamed, _, _) =
+            rename_symbols_safe(code, &state, &props, &locals, &HashSet::new(), false, false);
+        assert!(
+            renamed.contains("a: scope.state.a"),
+            "Expected scope.state.a but got: {}",
+            renamed
+        );
     }
 }

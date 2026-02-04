@@ -1,2 +1,0 @@
-oxc_ast::ast::JSXChild<'a>
-oxc_ast::ast::JSXChild<'_>

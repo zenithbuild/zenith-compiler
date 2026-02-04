@@ -25,9 +25,9 @@
 
 import fs from "fs"
 import path from "path"
-import { compileZenSource } from "./index"
-import { discoverLayouts } from "./discovery/layouts"
-import { processLayout } from "./transform/layoutProcessor"
+import { compile } from "./index"
+import { discoverComponents } from "./discovery/componentDiscovery"
+// discoverLayouts removed - layouts are now components
 import { discoverPages, generateRouteDefinition } from "@zenithbuild/router/manifest"
 import { analyzePageSource, getAnalysisSummary, getBuildOutputType, type PageAnalysis } from "./build-analyzer"
 import { generateBundleJS } from "./runtime/bundle-generator"
@@ -104,21 +104,21 @@ async function compilePage(
     // Determine source directory relative to pages (e.g., 'src' or 'app' or root)
     const srcDir = path.dirname(pagesDir)
 
-    // Discover layouts
-    const layoutsDir = path.join(srcDir, 'layouts')
-    const layouts = discoverLayouts(layoutsDir)
+    // Layout discovery removed in Phase A1
+    // const layouts = discoverLayouts(layoutsDir)
 
-    // Process with layout if one is used
-    let processedSource = source
-    const layoutToUse = layouts.get('DefaultLayout')
-
-    if (layoutToUse) {
-        processedSource = processLayout(source, layoutToUse)
+    // Discover components
+    const componentsDir = path.join(srcDir, 'components')
+    let components = new Map<string, any>()
+    if (fs.existsSync(componentsDir)) {
+        components = discoverComponents(componentsDir)
     }
 
-    // Compile with new pipeline
-    const result = await compileZenSource(processedSource, pagePath, {
-        componentsDir: path.join(srcDir, 'components')
+    // Compile with unified pipeline
+    // const layoutToUse = layouts.get('DefaultLayout')
+    const result = await compile(source, pagePath, {
+        components,
+        // layout: layoutToUse
     })
 
     if (!result.finalized) {
@@ -421,6 +421,17 @@ export async function buildSSG(options: SSGBuildOptions): Promise<void> {
                 : `page_${page.routePath.replace(/^\//, '').replace(/\//g, '_')}.js`
             const pageJS = generatePageJS(page)
 
+            if (page.routePath === '/' && pageJS.includes('</a>')) {
+                console.log('🚨 LEAKED JSX DETECTED IN INDEX.ZEN:')
+                // print relevant lines
+                const lines = pageJS.split('\n');
+                lines.forEach((line, i) => {
+                    if (line.includes('</a>')) {
+                        console.log(`${i + 1}: ${line.trim()}`)
+                    }
+                })
+            }
+
             // Bundle ONLY if compiler emitted a BundlePlan (no inference)
             let bundledJS = pageJS
             if (page.bundlePlan) {
@@ -524,5 +535,3 @@ export async function buildSSG(options: SSGBuildOptions): Promise<void> {
     }
 }
 
-// Legacy export for backwards compatibility
-export { buildSSG as buildSPA }

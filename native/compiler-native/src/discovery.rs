@@ -3,6 +3,7 @@
 //! Port of componentDiscovery.ts and layouts.ts to Rust.
 //! Recursively scans directories for .zen files and extracts metadata.
 
+#[cfg(feature = "napi")]
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,6 +35,8 @@ pub struct ComponentMetadata {
     pub expressions: Vec<ExpressionIR>,
     pub slots: Vec<SlotDefinition>,
     pub props: Vec<String>,
+    pub states: HashMap<String, String>,
+    pub locals: Vec<String>,
     pub styles: Vec<String>,
     pub script: Option<String>,
     pub script_attributes: Option<HashMap<String, String>>,
@@ -41,24 +44,14 @@ pub struct ComponentMetadata {
     pub has_styles: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LayoutMetadata {
-    pub name: String,
-    pub file_path: String,
-    pub props: Vec<String>,
-    pub states: HashMap<String, String>,
-    pub html: String,
-    pub scripts: Vec<String>,
-    pub styles: Vec<String>,
-}
+// LayoutMetadata removed - layouts are now just components
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // COMPONENT DISCOVERY
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Discover all components in a directory
-#[napi]
+#[cfg_attr(feature = "napi", napi)]
 pub fn discover_components_native(base_dir: String) -> serde_json::Value {
     let mut components = HashMap::new();
     let path = Path::new(&base_dir);
@@ -127,15 +120,40 @@ fn parse_component_file(file_path: &Path) -> Result<ComponentMetadata, String> {
     // Extract slots
     let slots = extract_slots(&template_ir.nodes);
 
-    // Extract props from script attributes
-    let props = if let Some(ref s) = script_ir {
-        s.attributes
-            .get("props")
-            .map(|p| p.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(Vec::new)
+    // Extract props & states from script
+    let mut props = Vec::new();
+    let mut states = HashMap::new();
+    let mut locals = Vec::new();
+
+    if let Some(ref s) = script_ir {
+        // 1. Attributes-based props (legacy)
+        if let Some(p_attr) = s.attributes.get("props") {
+            props.extend(p_attr.split(',').map(|s| s.trim().to_string()));
+        }
+
+        // 2. Syntax-based props (prop x)
+        props.extend(extract_props_from_script(&s.raw));
+
+        // 3. Interface-based props (interface Props { name: type; ... })
+        props.extend(extract_props_from_interface(&s.raw));
+
+        // 4. Syntax-based state (state x = y)
+        states = extract_state_from_script(&s.raw);
+
+        // 5. Capture all top-level locals (const, let, var, function)
+        let captured_locals = extract_locals_from_script(&s.raw);
+        locals.extend(captured_locals);
+    }
+
+    eprintln!("[Zenith DISCOVERY] Component: {}", name);
+    if let Some(ref s) = script_ir {
+        eprintln!("[Zenith DISCOVERY] Found script ({} chars)", s.raw.len());
     } else {
-        Vec::new()
-    };
+        eprintln!("[Zenith DISCOVERY] No script found");
+    }
+    eprintln!("[Zenith DISCOVERY] Extracted Props: {:?}", props);
+    eprintln!("[Zenith DISCOVERY] Extracted States: {:?}", states);
+    eprintln!("[Zenith DISCOVERY] Extracted Locals: {:?}", locals);
 
     // Extract CSS (Simple regex extraction for now, similar to original)
     // In a full implementation, this might reuse style parsing logic from lib.rs/index.ts
@@ -153,15 +171,17 @@ fn parse_component_file(file_path: &Path) -> Result<ComponentMetadata, String> {
         expressions: template_ir.expressions,
         slots,
         props,
+        states,
+        locals,
         styles: styles.clone(),
-        script: script_ir.as_ref().map(|s| s.raw.clone()),
-        script_attributes: script_ir.as_ref().map(|s| s.attributes.clone()),
+        script: script_ir.clone().map(|s| s.raw),
+        script_attributes: script_ir.clone().map(|s| s.attributes),
         has_script: script_ir.is_some(),
         has_styles: !styles.is_empty(),
     })
 }
 
-#[napi]
+#[cfg_attr(feature = "napi", napi)]
 pub fn extract_styles_native(source: String) -> Vec<String> {
     let re = regex::Regex::new(r"(?is)<style[^>]*>([\s\S]*?)</style>").unwrap();
     re.captures_iter(&source)
@@ -169,16 +189,28 @@ pub fn extract_styles_native(source: String) -> Vec<String> {
         .collect()
 }
 
-#[napi]
+#[cfg_attr(feature = "napi", napi)]
 pub fn extract_page_bindings_native(script: String) -> Vec<String> {
     let mut bindings = Vec::new();
-    let re = regex::Regex::new(r"(?:^|;|\n)\s*state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
+    let re = regex::Regex::new(r"state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)(?:\s*=\s*([^;\n]+))?").unwrap();
     for cap in re.captures_iter(&script) {
         if let Some(m) = cap.get(1) {
             bindings.push(m.as_str().to_string());
         }
     }
     bindings
+}
+
+#[cfg_attr(feature = "napi", napi)]
+pub fn extract_page_props_native(script: String) -> Vec<String> {
+    let mut props = Vec::new();
+    let re = regex::Regex::new(r"(?:^|[;{}\n])\s*prop\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
+    for cap in re.captures_iter(&script) {
+        if let Some(m) = cap.get(1) {
+            props.push(m.as_str().to_string());
+        }
+    }
+    props
 }
 
 /// Extract slot definitions from template nodes
@@ -240,117 +272,80 @@ fn extract_slots(nodes: &[TemplateNode]) -> Vec<SlotDefinition> {
 
     slots
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// LAYOUT DISCOVERY
+// HELPER FUNCTIONS FOR SCRIPT PARSING
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/// Discover layouts in a directory
-#[napi]
-pub fn discover_layouts_native(layouts_dir: String) -> serde_json::Value {
-    let mut layouts = HashMap::new();
-    let path = Path::new(&layouts_dir);
-
-    if !path.exists() {
-        return serde_json::to_value(layouts).unwrap_or(serde_json::Value::Null);
-    }
-
-    // Layouts are typically flat in the directory, but find_zen_files works recursively
-    let files = find_zen_files(path);
-
-    for file_path in files {
-        if let Ok(metadata) = parse_layout_file(&file_path) {
-            layouts.insert(metadata.name.clone(), metadata);
-        }
-    }
-
-    serde_json::to_value(layouts).unwrap_or(serde_json::Value::Null)
-}
-
-fn parse_layout_file(file_path: &Path) -> Result<LayoutMetadata, String> {
-    let source = fs::read_to_string(file_path).map_err(|e| format!("Failed to read: {}", e))?;
-
-    let path_str = file_path.to_string_lossy().to_string();
-    let name = file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Invalid filename".to_string())?;
-
-    // Parse script
-    let script_ir = parse_script(&source);
-
-    // Extract props & state (Simplistic extraction here, matching TS logic)
-    // Real implementation would use full JS parsing, but here we regex
-    let props = if let Some(ref s) = script_ir {
-        extract_props_from_script(&s.raw)
-    } else {
-        Vec::new()
-    };
-
-    let states = if let Some(ref s) = script_ir {
-        extract_state_from_script(&s.raw)
-    } else {
-        HashMap::new()
-    };
-
-    let styles = extract_styles_native(source.clone());
-
-    // Extract HTML - strip scripts and styles
-    // Similar to existing layouts.ts logic
-    let html = strip_scripts_and_styles(&source);
-
-    Ok(LayoutMetadata {
-        name,
-        file_path: path_str,
-        props,
-        states,
-        html,
-        scripts: script_ir.map(|s| vec![s.raw]).unwrap_or_default(),
-        styles,
-    })
-}
 
 fn extract_props_from_script(script: &str) -> Vec<String> {
-    // Regex from layouts.ts context or imply standard behavior
-    // TS impl: export const props = [...] ? No, likely defineProps or just props attribute?
-    // layouts.ts uses `extractProps` from scriptAnalysis.ts
-    // Let's implement a simple regex based on `const { prop } = defineProps...` or similar if needed.
-    // But commonly in Zenith layouts, props might be passed differently.
-    // The previous TS code called `extractProps(script.raw)`.
-    // Let's use a placeholder implementation or try to match common patterns.
-    // Assuming simple `defineProps` or just usage.
-    // For now, return empty or implement basic prop extraction if critical.
-    Vec::new()
+    let mut props = Vec::new();
+    // Support both 'prop name = ...' and 'prop name'
+    let re = regex::Regex::new(r"(?m)^\s*prop\s+([a-zA-Z_$][a-zA-Z0-9_$]*)(?:\s*=\s*([^;\n]+))?")
+        .unwrap();
+    for cap in re.captures_iter(script) {
+        if let Some(m) = cap.get(1) {
+            props.push(m.as_str().to_string());
+        }
+    }
+    props
 }
 
 fn extract_state_from_script(script: &str) -> HashMap<String, String> {
-    // TS impl calls `extractStateDeclarations`
-    // Regex for `state x = y`
     let mut states = HashMap::new();
-    let re = regex::Regex::new(r"(?:^|;|\n)\s*state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*([^;\n]+)")
+    let re = regex::Regex::new(r"(?m)^\s*state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)(?:\s*=\s*([^;\n]+))?")
         .unwrap();
 
     for cap in re.captures_iter(script) {
-        if let (Some(name), Some(val)) = (cap.get(1), cap.get(2)) {
-            states.insert(name.as_str().to_string(), val.as_str().trim().to_string());
+        if let Some(name) = cap.get(1) {
+            let val = cap
+                .get(2)
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_else(|| "undefined".to_string());
+            states.insert(name.as_str().to_string(), val);
         }
     }
     states
 }
 
-fn strip_scripts_and_styles(source: &str) -> String {
-    let script_re = regex::Regex::new(r"(?is)<script\b([^>]*)>([\s\S]*?)</script>").unwrap();
-    let style_re = regex::Regex::new(r"(?is)<style[^>]*>[\s\S]*?</style>").unwrap();
-
-    let no_scripts = script_re.replace_all(source, |caps: &regex::Captures| {
-        let attrs = &caps[1];
-        if attrs.contains("src=") {
-            caps[0].to_string()
-        } else {
-            String::new()
+fn extract_locals_from_script(script: &str) -> Vec<String> {
+    let mut locals = Vec::new();
+    // Match const|let|var|function followed by name
+    let re = regex::Regex::new(r"(?m)^\s*(?:const|let|var|function)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)")
+        .unwrap();
+    for cap in re.captures_iter(script) {
+        if let Some(m) = cap.get(1) {
+            locals.push(m.as_str().to_string());
         }
-    });
+    }
+    locals
+}
 
-    style_re.replace_all(&no_scripts, "").trim().to_string()
+/// Extract props from TypeScript interface Props { ... } syntax.
+/// Matches patterns like:
+/// - interface Props { title: string; description: string; }
+/// - interface Props {\n    title: string;\n    number: number;\n}
+fn extract_props_from_interface(script: &str) -> Vec<String> {
+    let mut props = Vec::new();
+
+    // Match `interface Props { ... }` block
+    // We use a regex to find the interface block, then parse internal properties
+    let interface_re = regex::Regex::new(r"(?s)interface\s+Props\s*\{([^}]*)\}").unwrap();
+
+    if let Some(cap) = interface_re.captures(script) {
+        if let Some(body) = cap.get(1) {
+            let body_str = body.as_str();
+            // Match property definitions: name: type or name?: type
+            let prop_re = regex::Regex::new(r"([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\??\s*:").unwrap();
+            for prop_cap in prop_re.captures_iter(body_str) {
+                if let Some(m) = prop_cap.get(1) {
+                    props.push(m.as_str().to_string());
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "[Zenith DISCOVERY interface] Extracted interface Props: {:?}",
+        props
+    );
+    props
 }

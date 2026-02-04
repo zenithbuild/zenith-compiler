@@ -11,8 +11,7 @@
  * - Style injection
  */
 
-import type { FinalizedOutput } from './finalizeOutput'
-import type { RuntimeCode } from '../runtime/analyzeAndEmit'
+import type { FinalizedOutput } from '../output/types'
 
 /**
  * Generate final bundle code

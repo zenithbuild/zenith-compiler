@@ -11,7 +11,28 @@
     // Internal reactivity state
     let cE = null; const cS = []; let bD = 0; const pE = new Set();
     window.__ZENITH_EXPRESSIONS__ = new Map();
+    window.__ZENITH_SCOPES__ = {};
+    let activeScope = null;
     let isFlushing = false; let flushScheduled = false;
+
+    // Phase A3: Post-Mount Execution Hook
+    // Track mounted scopes for idempotency (each component runs once)
+    const mountedScopes = new Set();
+
+    // mountComponent: Execute component's __run() thunk after DOM insertion
+    // INVARIANT: Called once per component instance, after DOM is ready
+    function mountComponent(scopeId) {
+        if (mountedScopes.has(scopeId)) return; // Idempotency guard
+        mountedScopes.add(scopeId);
+
+        const scope = window.__ZENITH_SCOPES__[scopeId];
+        if (!scope) return;
+
+        // Execute the component's run thunk (Phase A2 contract)
+        if (typeof scope.__run === 'function') {
+            scope.__run();
+        }
+    }
     function pC(e) { cS.push(cE); cE = e; }
     function oC() { cE = cS.pop(); }
     function tD(s) { if (cE) { s.add(cE); cE.dependencies.add(s); } }
@@ -70,10 +91,14 @@
     var zenState = window.zenState = function (o) {
         const subs = new Map();
         function gS(p) { if (!subs.has(p)) subs.set(p, new Set()); return subs.get(p); }
+        function notify(p) { nS(gS(p)); scheduleFlush(); }
+        function subscribe(p, ef) { gS(p).add(ef); ef.dependencies.add(gS(p)); }
         function cP(obj, pPath = '') {
             if (obj === null || typeof obj !== 'object' || obj._isSignal) return obj;
             return new Proxy(obj, {
                 get(t, p) {
+                    if (p === Symbol.for('zenith_notify')) return notify;
+                    if (p === Symbol.for('zenith_subscribe')) return subscribe;
                     if (typeof p === 'symbol') return t[p];
                     const path = pPath ? `${pPath}.${String(p)}` : String(p);
                     tD(gS(path));
@@ -87,7 +112,9 @@
                     const oV = t[p];
                     if (oV && typeof oV === 'function' && oV._isSignal) oV(nV);
                     else if (oV !== nV) {
-                        t[p] = nV; nS(gS(path));
+                        t[p] = nV;
+                        // Debug logs removed
+                        nS(gS(path));
                         const pts = path.split('.');
                         for (let i = pts.length - 1; i >= 0; i--) {
                             const pp = pts.slice(0, i).join('.');
@@ -124,6 +151,7 @@
             ef.isRunning = true;
             cEf(ef);
             pC(ef);
+            if (opts.id) { } // Debug logs removed
             try { if (cl) cl(); cl = fn(); }
             finally {
                 oC();
@@ -131,6 +159,7 @@
                 // Don't call flushEffects here - let the microtask handle it
             }
         }
+        if (opts.id) { } // Debug logs removed
         if (!opts.defer) ex();
         return () => { cEf(ef); if (cl) cl(); };
     };
@@ -152,28 +181,83 @@
         try { return fn(); } finally { oC(); }
     };
 
+    // Manual notification for mutation (Required for Phase 6)
+    var zenithNotify = window.zenithNotify = function (scope, category, key) {
+        if (!scope || !scope[category]) return;
+        const target = scope[category];
+        const notify = target[Symbol.for('zenith_notify')];
+        if (typeof notify === 'function') {
+            notify(key);
+        } else {
+        }
+    };
+
+    var zenithSubscribe = window.zenithSubscribe = function (scope, category, key, effect) {
+        if (!scope || !scope[category]) return;
+        const target = scope[category];
+        const subscribe = target[Symbol.for('zenith_subscribe')];
+        if (typeof subscribe === 'function') {
+            subscribe(key, effect);
+        }
+    };
+
     var zenRef = window.zenRef = (i) => ({ current: i || null });
     var zenOnMount = window.zenOnMount = (cb) => { if (window.__zenith && window.__zenith.activeInstance) window.__zenith.activeInstance.mountHooks.push(cb); };
     var zenOnUnmount = window.zenOnUnmount = (cb) => { /* TODO: implement unmount hooks */ };
     function hC(parent, child) {
         if (child == null || child === false) return;
-        if (typeof child === 'function') {
-            const ph = document.createComment('expr');
-            parent.appendChild(ph);
-            let curNodes = [];
-            window.zenEffect(() => {
-                const r = child();
-                curNodes.forEach(n => { if (n.parentNode) n.parentNode.removeChild(n); });
-                curNodes = [];
-                if (r == null || r === false) return;
-                const items = Array.isArray(r) ? r.flat(Infinity) : [r];
-                items.forEach(item => {
-                    if (item == null || item === false) return;
-                    const node = item instanceof Node ? item : document.createTextNode(String(item));
-                    ph.parentNode.insertBefore(node, ph);
-                    curNodes.push(node);
-                });
-            });
+
+        let fn = child;
+        let id = null;
+        if (typeof child === 'object' && child.fn) {
+            fn = child.fn;
+            id = child.id;
+        }
+
+        // PHASE 3: Compile-Time Head Resolution
+        // For title elements, evaluate expressions immediately and sync document.title
+        // This prevents <!--expr:...--> comments from appearing in title
+        const isTitle = parent && parent.tagName && parent.tagName.toLowerCase() === 'title';
+
+        if (typeof fn === 'function') {
+            if (isTitle) {
+                // Title: Evaluate immediately, no placeholder comments
+                const val = fn();
+                if (val != null && val !== false) {
+                    const text = String(val);
+                    parent.appendChild(document.createTextNode(text));
+                    document.title = text;
+                }
+                // Optionally set up reactive sync (runs if expression value changes)
+                window.zenEffect(() => {
+                    const newVal = fn();
+                    if (newVal != null && newVal !== false) {
+                        const newText = String(newVal);
+                        if (document.title !== newText) {
+                            parent.textContent = newText;
+                            document.title = newText;
+                        }
+                    }
+                }, { id: id ? `title-${id}` : 'title-sync' });
+            } else {
+                // Standard: Create placeholder comment for reactive updates
+                const ph = document.createComment('expr' + (id ? ':' + id : ''));
+                parent.appendChild(ph);
+                let curNodes = [];
+                window.zenEffect(() => {
+                    const r = fn();
+                    curNodes.forEach(n => { if (n.parentNode) n.parentNode.removeChild(n); });
+                    curNodes = [];
+                    if (r == null || r === false) return;
+                    const items = Array.isArray(r) ? r.flat(Infinity) : [r];
+                    items.forEach(item => {
+                        if (item == null || item === false) return;
+                        const node = item instanceof Node ? item : document.createTextNode(String(item));
+                        ph.parentNode.insertBefore(node, ph);
+                        curNodes.push(node);
+                    });
+                }, { id });
+            }
         } else if (Array.isArray(child)) {
             child.flat(Infinity).forEach(c => hC(parent, c));
         } else {
@@ -181,10 +265,13 @@
         }
     }
 
-    window.zenithHydrate = function (state, container = document) {
+    window.zenithHydrate = function (state, container = document, locals = {}) {
         const ir = window.canonicalIR; if (!ir) return;
         window.__ZENITH_STATE__ = state;
-        const nodes = ir(state);
+
+        // Root scope
+        const rootScope = { state, props: {}, locals: locals };
+        const nodes = ir(rootScope);
 
         // Helper to find specific top-level tags in a fragment or list
         function findTag(items, tag) {
@@ -204,12 +291,56 @@
 
         if (headNode) {
             const headMount = document.head;
-            // Sync title
+            // Sync title - PHASE 3: Compile-Time Head Resolution
+            // Title must be resolved as static text, not through reactive hC
             const newTitle = headNode.querySelector('title');
             if (newTitle) {
-                const oldTitle = headMount.querySelector('title');
-                if (oldTitle) oldTitle.textContent = newTitle.textContent;
-                else headMount.appendChild(newTitle.cloneNode(true));
+                let oldTitle = headMount.querySelector('title');
+                if (!oldTitle) {
+                    oldTitle = document.createElement('title');
+                    headMount.appendChild(oldTitle);
+                }
+
+                // FIXED: Instead of processing through hC which creates expression comments,
+                // we need to directly extract and evaluate the title content.
+                // Get all children and resolve any expression functions immediately.
+                const resolveContent = (children) => {
+                    let result = '';
+                    (Array.isArray(children) ? children : [children]).forEach(child => {
+                        if (child == null || child === false) return;
+                        if (typeof child === 'function') {
+                            // Expression function - call it to get the value
+                            const val = child();
+                            if (val != null && val !== false) result += String(val);
+                        } else if (typeof child === 'object' && child.fn) {
+                            // Expression object with fn property
+                            const val = child.fn();
+                            if (val != null && val !== false) result += String(val);
+                        } else if (child instanceof Node) {
+                            // DOM node - get text content
+                            result += child.textContent || '';
+                        } else {
+                            result += String(child);
+                        }
+                    });
+                    return result;
+                };
+
+                // Extract content from newTitle - could be DOM nodes or IR children
+                const titleContent = newTitle.childNodes.length > 0
+                    ? Array.from(newTitle.childNodes).map(n => n.textContent).join('')
+                    : '';
+
+                oldTitle.textContent = titleContent;
+                document.title = titleContent;
+
+                // Create an effect to sync document.title reactively for any future updates
+                window.zenEffect(() => {
+                    const text = oldTitle.textContent?.trim();
+                    if (text && document.title !== text) {
+                        document.title = text;
+                    }
+                }, { id: 'title-sync' });
             }
             // Sync meta tags (very basic)
             headNode.querySelectorAll('meta').forEach(newMeta => {
@@ -237,6 +368,30 @@
             const items = Array.isArray(nodes) ? nodes : [nodes];
             items.forEach(n => hC(bodyMount, n));
         }
+
+        // Phase A3: After DOM is fully constructed, mount all component scopes
+        // This ensures: props populated -> DOM created -> run() executes (Phase A4 timing)
+        for (const scopeId in window.__ZENITH_SCOPES__) {
+            mountComponent(scopeId);
+        }
+
+        // PHASE 3: Post-mount title sync
+        // After all scopes are mounted, force a flush to re-evaluate title effects
+        // This ensures scope.locals values (like pageTitle) are available
+        queueMicrotask(() => {
+            // Force the title effect to re-run by triggering a flush
+            // The title effect registered in hC will now see the correct locals values
+            flushEffects();
+
+            // Sync document.title from the title element as a fallback
+            const titleEl = document.querySelector('title');
+            if (titleEl && titleEl.textContent) {
+                const text = titleEl.textContent.trim();
+                if (text && document.title !== text) {
+                    document.title = text;
+                }
+            }
+        });
     };
     /* [ZENITH-NATIVE] zenOrder: Scheduling primitive for ordered effects/animations */
     window.zenOrder = function (fn) {
@@ -280,20 +435,33 @@
                             const s = window.__ZENITH_STATE__;
                             if (s && s[v] && typeof s[v] === 'object' && 'current' in s[v]) s[v].current = el;
                         }
-                    } else if (k.startsWith('on') && typeof v === 'function') {
-                        el.addEventListener(k.slice(2).toLowerCase(), (e) => {
-                            const h = v(e, el); if (typeof h === 'function') h(e, el);
-                        });
-                    } else if (typeof v === 'function') {
-                        window.zenEffect(() => {
-                            const val = v();
-                            if (k === 'class' || k === 'className') setClass(el, val);
-                            else if (val == null || val === false) el.removeAttribute(k);
-                            else if (el.setAttribute) el.setAttribute(k, String(val));
-                        });
+                    } else if (k.startsWith('on')) {
+                        let fn = v;
+                        if (v && typeof v === 'object' && v.fn) fn = v.fn;
+                        if (typeof fn === 'function') {
+                            el.addEventListener(k.slice(2).toLowerCase(), (e) => {
+                                // Event handlers are called with appropriate context
+                                const h = fn(e, el); if (typeof h === 'function') h(e, el);
+                            });
+                        }
                     } else {
-                        if (k === 'class' || k === 'className') setClass(el, v);
-                        else if (el.setAttribute) el.setAttribute(k, String(v));
+                        let fn = v;
+                        let id = null;
+                        if (typeof v === 'object' && v.fn) {
+                            fn = v.fn;
+                            id = v.id;
+                        }
+                        if (typeof fn === 'function') {
+                            window.zenEffect(() => {
+                                const val = fn();
+                                if (k === 'class' || k === 'className') setClass(el, val);
+                                else if (val == null || val === false) el.removeAttribute(k);
+                                else if (el.setAttribute) el.setAttribute(k, String(val));
+                            }, { id });
+                        } else {
+                            if (k === 'class' || k === 'className') setClass(el, v);
+                            else if (el.setAttribute) el.setAttribute(k, String(v));
+                        }
                     }
                 }
             }
@@ -360,8 +528,12 @@
         // Lifecycle
         zenOnMount: zenOnMount,
         zenOnUnmount: zenOnUnmount,
+        // Component mounting (Phase A3)
+        mountComponent: mountComponent,
         // Hydration
         zenithHydrate: window.zenithHydrate,
+        zenithNotify: zenithNotify,
+        zenithSubscribe: zenithSubscribe,
         // Virtual DOM
         h: window.__zenith.h,
         fragment: window.__zenith.fragment,
@@ -371,5 +543,5 @@
         zenRoute: zenRoute
     });
 
-    console.log('[Zenith] Runtime bootstrapped successfully');
+
 })();
