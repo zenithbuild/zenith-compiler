@@ -901,9 +901,17 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
 
                     let val = match &attr.value {
                         AttributeValue::Static(s) => {
-                            // If it's a standard event handler, wrap it as a function call
+                            // If it's a standard event handler, wrap it correctly
                             if p_name.starts_with("on") && p_name.len() > 2 {
-                                format!("() => {}()", s)
+                                let is_simple_id = s
+                                    .chars()
+                                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                                    && !s.is_empty();
+                                if is_simple_id {
+                                    format!("() => {}()", s)
+                                } else {
+                                    format!("() => {{ {} }}", s)
+                                }
                             } else {
                                 format!("\"{}\"", escape_js_string(s))
                             }

@@ -42,6 +42,8 @@ export interface ZenManifestExport {
   requiredCapabilities: Array<string>
   /** Compiled script content (author code) */
   script: string
+  /** Full hydrated bundle */
+  bundle: string
   /** Compiled expressions */
   expressions: string
   /** Compiled styles */

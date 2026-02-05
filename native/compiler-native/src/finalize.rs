@@ -9,7 +9,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::codegen::{generate_runtime_code_internal, CodegenInput, ScriptImport};
-use crate::validate::{ExpressionInput, LoopContextInput, ZenIR};
+use crate::validate::{
+    ComponentNode, ConditionalFragmentNode, ElementNode, ExpressionInput, LoopContext,
+    LoopContextInput, LoopFragmentNode, OptionalFragmentNode, TemplateNode, ZenIR,
+};
 
 /// Inject head directive elements into HTML <head> section at compile time
 fn inject_head_elements(html: &str, head: &crate::validate::HeadDirective) -> String {
@@ -120,6 +123,8 @@ pub struct ZenManifestExport {
     pub required_capabilities: Vec<String>,
     /// Compiled script content (author code)
     pub script: String,
+    /// Full hydrated bundle
+    pub bundle: String,
     /// Compiled expressions
     pub expressions: String,
     /// Compiled styles
@@ -277,14 +282,20 @@ pub fn finalize_output_internal(
     let runtime_code = generate_runtime_code_internal(codegen_input);
     let final_imports = emit_imports(&runtime_code.npm_imports);
 
+    // Scan for event handlers if not already detected
+    let mut has_events = ir.has_events;
+    if !has_events {
+        has_events = check_for_events(&ir.template.nodes);
+    }
+
     // Generate manifest for bundler
-    let is_static = !ir.uses_state && !ir.has_events && ir.all_states.is_empty();
+    let is_static = !ir.uses_state && !has_events && ir.all_states.is_empty();
     let mut required_capabilities = vec!["core".to_string()];
 
     if ir.uses_state || !ir.all_states.is_empty() {
         required_capabilities.push("reactivity".to_string());
     }
-    if ir.has_events || ir.uses_state || !ir.all_states.is_empty() {
+    if has_events || ir.uses_state || !ir.all_states.is_empty() {
         required_capabilities.push("hydration".to_string());
     }
 
@@ -292,11 +303,12 @@ pub fn finalize_output_internal(
         entry: ir.file_path.clone(),
         template: resolved_html.clone(),
         uses_state: ir.uses_state || !ir.all_states.is_empty(),
-        has_events: ir.has_events,
+        has_events,
         is_static,
         css_classes: ir.css_classes.clone(),
         required_capabilities,
         script: runtime_code.script,
+        bundle: runtime_code.bundle,
         expressions: runtime_code.expressions,
         styles: runtime_code.styles,
         npm_imports: final_imports,
@@ -308,4 +320,53 @@ pub fn finalize_output_internal(
         errors: vec![],
         manifest: Some(manifest),
     })
+}
+
+fn check_for_events(nodes: &[TemplateNode]) -> bool {
+    for node in nodes {
+        match node {
+            TemplateNode::Element(el) => {
+                for attr in &el.attributes {
+                    let name = attr.name.to_lowercase();
+                    if name.starts_with("on")
+                        || name.starts_with("data-zen-click")
+                        || name.starts_with("data-zen-change")
+                        || name.starts_with("data-zen-input")
+                    {
+                        return true;
+                    }
+                }
+                if check_for_events(&el.children) {
+                    return true;
+                }
+            }
+            TemplateNode::Component(c) => {
+                for attr in &c.attributes {
+                    if attr.name.to_lowercase().starts_with("on") {
+                        return true;
+                    }
+                }
+                if check_for_events(&c.children) {
+                    return true;
+                }
+            }
+            TemplateNode::ConditionalFragment(cf) => {
+                if check_for_events(&cf.consequent) || check_for_events(&cf.alternate) {
+                    return true;
+                }
+            }
+            TemplateNode::LoopFragment(lf) => {
+                if check_for_events(&lf.body) {
+                    return true;
+                }
+            }
+            TemplateNode::OptionalFragment(of) => {
+                if check_for_events(&of.fragment) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }

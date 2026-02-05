@@ -8,7 +8,7 @@ export type CompiledTemplate = {
   html: string
   bindings: Binding[]
   scripts: string | null
-  styles: string[]
+  styles: string
 }
 
 export type Binding = {
@@ -36,7 +36,7 @@ export type FinalizedOutput = {
   html: string
   js: string
   npmImports: string
-  styles: string[]
+  styles: string
   hasErrors: boolean
   errors: string[]
   bundlePlan?: any

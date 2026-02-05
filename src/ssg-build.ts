@@ -60,7 +60,7 @@ interface CompiledPage {
     /** Hoisted imports for the page script */
     pageImports: string
     /** Page styles */
-    styles: string[]
+    styles: string
     /** Route score for matching priority */
     score: number
     /** Dynamic route parameter names */
@@ -107,11 +107,24 @@ async function compilePage(
     // Layout discovery removed in Phase A1
     // const layouts = discoverLayouts(layoutsDir)
 
-    // Discover components
+    // Discover components & layouts
     const componentsDir = path.join(srcDir, 'components')
-    let components = new Map<string, any>()
+    const layoutsDir = path.join(srcDir, 'layouts')
+    const components = new Map<string, any>()
+
     if (fs.existsSync(componentsDir)) {
-        components = discoverComponents(componentsDir)
+        const comps = discoverComponents(componentsDir)
+        for (const [k, v] of comps) components.set(k, v)
+    }
+
+    if (fs.existsSync(layoutsDir)) {
+        const layoutComps = discoverComponents(layoutsDir)
+        for (const [k, v] of layoutComps) {
+            // Start with uppercase = component
+            if (k[0] === k[0]?.toUpperCase()) {
+                components.set(k, v)
+            }
+        }
     }
 
     // Compile with unified pipeline
@@ -129,7 +142,7 @@ async function compilePage(
     const html = result.finalized.html
     const js = result.finalized.js || ''
     const imports = result.finalized.npmImports || ''
-    const styles = result.finalized.styles || []
+    const styles = result.finalized.styles || ''
 
     // Generate route definition
     const routeDef = generateRouteDefinition(pagePath, pagesDir)
@@ -179,7 +192,7 @@ function generatePageHTML(page: CompiledPage, globalStyles: string, pluginEnvelo
     const { html, styles, analysis, routePath, pageScript } = page
 
     // Combine styles
-    const pageStyles = styles.join('\n')
+    const pageStyles = styles
     const allStyles = globalStyles + '\n' + pageStyles
 
     // Build script tags only if needed

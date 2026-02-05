@@ -1115,14 +1115,28 @@ pub fn parse_full_zen_native(
         .map_err(|e| napi::Error::from_reason(e))?;
 
     // Step 7: Build result with all fields
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "ir": zen_ir,
         "html": finalized.html,
         "hasErrors": finalized.has_errors,
         "errors": finalized.errors,
-        "manifest": finalized.manifest,
         "bindings": transform_output.bindings,
     });
+
+    if let Some(manifest) = finalized.manifest {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("js".to_string(), serde_json::json!(manifest.bundle));
+            obj.insert(
+                "npmImports".to_string(),
+                serde_json::json!(manifest.npm_imports),
+            );
+            obj.insert("styles".to_string(), serde_json::json!(manifest.styles));
+            obj.insert(
+                "manifest".to_string(),
+                serde_json::to_value(&manifest).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
 
     Ok(result)
 }

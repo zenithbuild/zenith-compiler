@@ -24,7 +24,7 @@ interface CompiledPage {
   filePath: string
   html: string
   scripts: string[]
-  styles: string[]
+  styles: string
   score: number
   paramNames: string[]
   regex: RegExp
@@ -177,12 +177,11 @@ function generateRuntimeRouterCode(): string {
    * Inject styles
    */
   function injectStyles(styles) {
-    styles.forEach((content, i) => {
-      const style = document.createElement('style');
-      style.setAttribute('data-zen-page-style', String(i));
-      style.textContent = content;
-      document.head.appendChild(style);
-    });
+    if (!styles) return;
+    const style = document.createElement('style');
+    style.setAttribute('data-zen-page-style', '0');
+    style.textContent = styles;
+    document.head.appendChild(style);
   }
   
   /**

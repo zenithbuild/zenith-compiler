@@ -49,7 +49,7 @@ export function analyzePageSource(source: string): PageAnalysis {
     const hasState = /\bstate\s+\w+\s*=/.test(scriptContent)
 
     // Check for event handlers in template
-    const hasEventHandlers = /\bon(click|change|input|submit|focus|blur|keydown|keyup|keypress|mousedown|mouseup|mouseover|mouseout|mouseenter|mouseleave)\s*=\s*["'{]/.test(templateContent)
+    const hasEventHandlers = /\bon(click|change|input|submit|focus|blur|keydown|keyup|keypress|mousedown|mouseup|mouseover|mouseout|mouseenter|mouseleave|load)\s*=\s*["'{]/.test(templateContent)
 
     // Check for lifecycle hooks
     const hasLifecycleHooks = /\bzen(OnMount|OnUnmount)\s*\(/.test(scriptContent)

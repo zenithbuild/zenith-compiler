@@ -310,25 +310,10 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { generateRuntimeCode, generateCodegenIntent, ResolutionContext, resolveComponentsNative, discoverComponentsNative, extractStylesNative, extractPageBindingsNative, extractPagePropsNative, finalizeOutputNative, parseTemplateNative, parseScriptNative, isComponentTagNative, parseFullZenNative, lowerFragmentsNative, evaluateExpressionNative, classifyExpressionNative, analyzeExpressions, transformTemplateNative, validateIr, compileBridge } = nativeBinding
+const { generateCodegenIntent, ResolutionContext, parseFullZenNative, transformTemplateNative, compileBridge } = nativeBinding
 
-module.exports.generateRuntimeCode = generateRuntimeCode
 module.exports.generateCodegenIntent = generateCodegenIntent
 module.exports.ResolutionContext = ResolutionContext
-module.exports.resolveComponentsNative = resolveComponentsNative
-module.exports.discoverComponentsNative = discoverComponentsNative
-module.exports.extractStylesNative = extractStylesNative
-module.exports.extractPageBindingsNative = extractPageBindingsNative
-module.exports.extractPagePropsNative = extractPagePropsNative
-module.exports.finalizeOutputNative = finalizeOutputNative
-module.exports.parseTemplateNative = parseTemplateNative
-module.exports.parseScriptNative = parseScriptNative
-module.exports.isComponentTagNative = isComponentTagNative
 module.exports.parseFullZenNative = parseFullZenNative
-module.exports.lowerFragmentsNative = lowerFragmentsNative
-module.exports.evaluateExpressionNative = evaluateExpressionNative
-module.exports.classifyExpressionNative = classifyExpressionNative
-module.exports.analyzeExpressions = analyzeExpressions
 module.exports.transformTemplateNative = transformTemplateNative
-module.exports.validateIr = validateIr
 module.exports.compileBridge = compileBridge
