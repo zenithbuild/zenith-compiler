@@ -20,25 +20,7 @@ export interface ScriptImport {
   typeOnly: boolean
   sideEffect: boolean
 }
-export declare function generateRuntimeCode(inputJson: string): RuntimeCode
 export declare function generateCodegenIntent(): string
-export declare function resolveComponentsNative(irJson: string, componentsJson: string): string
-/** Discover all components in a directory */
-export declare function discoverComponentsNative(baseDir: string): any
-export declare function extractStylesNative(source: string): Array<string>
-export declare function extractPageBindingsNative(script: string): Array<string>
-export declare function extractPagePropsNative(script: string): Array<string>
-export interface VirtualModule {
-  id: string
-  code: string
-}
-export interface BundlePlan {
-  entry: string
-  platform: string
-  format: string
-  resolveRoots: Array<string>
-  virtualModules: Array<VirtualModule>
-}
 /**
  * Manifest export for the bundler's capability-based chunking.
  * This is the Compiler → Bundler handshake contract.
@@ -74,10 +56,6 @@ export interface FinalizedOutput {
   /** Manifest for bundler's capability-based chunking */
   manifest?: ZenManifestExport
 }
-export declare function finalizeOutputNative(irJson: any, compiledJson: any): FinalizedOutput
-export declare function parseTemplateNative(html: string, filePath: string): any
-export declare function parseScriptNative(html: string): any | null
-export declare function isComponentTagNative(tagName: string): boolean
 /**
  * Full Zenith compilation entry point - the "One True Syscall"
  *
@@ -92,29 +70,6 @@ export interface ParseFullOptions {
   props?: any
 }
 export declare function parseFullZenNative(source: string, filePath: string, optionsJson: string): any
-export interface ExpressionAnalysisResult {
-  id: string
-  classification: string
-  dependencies: Array<string>
-  usesState: boolean
-  usesLoopContext: boolean
-}
-export interface EvaluatedExpression {
-  id: string
-  expressionType: string
-  dependencies: Array<string>
-  usesState: boolean
-  usesLoopContext: boolean
-  classificationJson: string
-}
-export interface AnalysisOutput {
-  results: Array<ExpressionAnalysisResult>
-  bindingCount: number
-}
-export declare function lowerFragmentsNative(nodesJson: string, expressionsJson: string, filePath: string): string
-export declare function evaluateExpressionNative(id: string, code: string, knownBindingsJson: string, loopContextJson?: string | undefined | null): EvaluatedExpression
-export declare function classifyExpressionNative(code: string): string
-export declare function analyzeExpressions(inputJson: string): AnalysisOutput
 export interface Binding {
   id: string
   type: string
@@ -147,6 +102,5 @@ export interface LoopContext {
   variables: Array<string>
   mapSource?: string
 }
-export declare function validateIr(irJson: string): CompilerError | null
 export declare function compileBridge(): string
 export declare class ResolutionContext { }

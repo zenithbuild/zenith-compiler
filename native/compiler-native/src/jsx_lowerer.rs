@@ -365,27 +365,6 @@ lazy_static::lazy_static! {
 }
 
 impl<'a> ScriptRenamer<'a> {
-    pub fn new(allocator: &'a Allocator, state_bindings: HashSet<String>) -> Self {
-        Self {
-            allocator,
-            ast: AstBuilder::new(allocator),
-            state_bindings,
-            prop_bindings: HashSet::new(),
-            local_bindings: HashSet::new(),
-            external_locals: HashSet::new(),
-            scope_stack: vec![HashSet::new()],
-            errors: Vec::new(),
-            state_deps: HashSet::new(),
-            prop_deps: HashSet::new(),
-            disallow_reactive_access: false,
-            is_event_handler: false,
-            module_bindings: HashSet::new(),
-            collected_imports: Vec::new(),
-            mutated_state_deps: HashSet::new(),
-            allow_prop_fallback: false,
-        }
-    }
-
     pub fn with_categories(
         allocator: &'a Allocator,
         state_bindings: HashSet<String>,
@@ -401,31 +380,6 @@ impl<'a> ScriptRenamer<'a> {
             local_bindings,
             external_locals,
             scope_stack: vec![HashSet::new()],
-            errors: Vec::new(),
-            state_deps: HashSet::new(),
-            prop_deps: HashSet::new(),
-            disallow_reactive_access: false,
-            is_event_handler: false,
-            module_bindings: HashSet::new(),
-            collected_imports: Vec::new(),
-            mutated_state_deps: HashSet::new(),
-            allow_prop_fallback: false,
-        }
-    }
-
-    pub fn with_locals(
-        allocator: &'a Allocator,
-        state_bindings: HashSet<String>,
-        local_vars: HashSet<String>,
-    ) -> Self {
-        Self {
-            allocator,
-            ast: AstBuilder::new(allocator),
-            state_bindings,
-            prop_bindings: HashSet::new(),
-            local_bindings: HashSet::new(),
-            external_locals: HashSet::new(),
-            scope_stack: vec![local_vars],
             errors: Vec::new(),
             state_deps: HashSet::new(),
             prop_deps: HashSet::new(),
@@ -524,13 +478,6 @@ impl<'a> ScriptRenamer<'a> {
 
         // Otherwise error
         IdentifierRef::UnresolvedRef(name.to_string())
-    }
-
-    fn should_rename(&self, name: &str) -> bool {
-        (self.state_bindings.contains(name)
-            || self.prop_bindings.contains(name)
-            || self.local_bindings.contains(name))
-            && !self.is_local(name)
     }
 
     fn create_member_access(&self, category: &str, prop_name: &str) -> MemberExpression<'a> {
@@ -686,7 +633,7 @@ impl<'a> ScriptRenamer<'a> {
                         );
                     }
                 }
-                if let Some(rest) = &obj.rest {
+                if let Some(_rest) = &obj.rest {
                     // Rest pattern: ...rest - Not implemented for simple expansion
                 }
             }
@@ -1098,6 +1045,11 @@ impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
                             "Z-ERR-RUN-REACTIVE: Component script modified reactive state `{}` in __run(). Use event handlers for state mutation.",
                             n
                         ));
+                    } else if !self.is_event_handler {
+                        self.errors.push(format!(
+                            "Z-ERR-REACTIVITY-BOUNDARY: State `{}` modified in an expression. State mutation is only allowed in event handlers.",
+                            n
+                        ));
                     }
 
                     // Track dependency for Phase 5
@@ -1113,6 +1065,12 @@ impl<'a> VisitMut<'a> for ScriptRenamer<'a> {
                     if self.disallow_reactive_access {
                         self.errors.push(format!(
                             "Z-ERR-RUN-REACTIVE: Component script attempt to modify reactive prop `{}` in __run(). Props are read-only.",
+                            n
+                        ));
+                    } else if !self.is_event_handler {
+                        // Props are always read-only, but let's give a specific boundary error if mutated in expression
+                        self.errors.push(format!(
+                            "Z-ERR-REACTIVITY-BOUNDARY: Prop `{}` modified in an expression. Props are read-only.",
                             n
                         ));
                     }

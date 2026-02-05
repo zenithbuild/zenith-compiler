@@ -7,20 +7,12 @@
 use napi_derive::napi;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::Path;
 
 use crate::codegen::{generate_runtime_code_internal, CodegenInput, ScriptImport};
 use crate::validate::{ExpressionInput, LoopContextInput, ZenIR};
 
 /// Inject head directive elements into HTML <head> section at compile time
-fn inject_head_elements(
-    html: &str,
-    head: &crate::validate::HeadDirective,
-    props: &std::collections::HashMap<String, String>,
-) -> String {
-    use crate::static_eval::static_eval;
-
+fn inject_head_elements(html: &str, head: &crate::validate::HeadDirective) -> String {
     let mut injected = String::new();
 
     // Inject title if present
@@ -104,25 +96,6 @@ fn inject_head_elements(
 pub struct CompiledTemplate {
     pub html: String,
     pub styles: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "napi", napi(object))]
-#[serde(rename_all = "camelCase")]
-pub struct VirtualModule {
-    pub id: String,
-    pub code: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "napi", napi(object))]
-#[serde(rename_all = "camelCase")]
-pub struct BundlePlan {
-    pub entry: String,
-    pub platform: String,
-    pub format: String,
-    pub resolve_roots: Vec<String>,
-    pub virtual_modules: Vec<VirtualModule>,
 }
 
 /// Manifest export for the bundler's capability-based chunking.
@@ -238,13 +211,11 @@ pub fn finalize_output_internal(
     compiled: CompiledTemplate,
 ) -> Result<FinalizedOutput, String> {
     // PHASE 3: Resolve HEAD_EXPR markers to static values
-    // Populate props from ir.all_states so static resolution has access to state values (legacy prop needed for inject_head_elements API)
-    let head_props: std::collections::HashMap<String, String> = ir.all_states.clone();
     let mut resolved_html = compiled.html.clone();
 
     // PHASE 3.5: Inject Head component content into HTML <head>
     if let Some(ref head_directive) = ir.head_directive {
-        resolved_html = inject_head_elements(&resolved_html, head_directive, &head_props);
+        resolved_html = inject_head_elements(&resolved_html, head_directive);
     }
 
     // Verify HTML (after HEAD_EXPR resolution)
@@ -304,112 +275,6 @@ pub fn finalize_output_internal(
     };
 
     let runtime_code = generate_runtime_code_internal(codegen_input);
-    let final_imports = emit_imports(&runtime_code.npm_imports);
-
-    // Generate manifest for bundler
-    let is_static = !ir.uses_state && !ir.has_events && ir.all_states.is_empty();
-    let mut required_capabilities = vec!["core".to_string()];
-
-    if ir.uses_state || !ir.all_states.is_empty() {
-        required_capabilities.push("reactivity".to_string());
-    }
-    if ir.has_events || ir.uses_state || !ir.all_states.is_empty() {
-        required_capabilities.push("hydration".to_string());
-    }
-
-    let manifest = ZenManifestExport {
-        entry: ir.file_path.clone(),
-        template: resolved_html.clone(),
-        uses_state: ir.uses_state || !ir.all_states.is_empty(),
-        has_events: ir.has_events,
-        is_static,
-        css_classes: ir.css_classes.clone(),
-        required_capabilities,
-        script: runtime_code.script,
-        expressions: runtime_code.expressions,
-        styles: runtime_code.styles,
-        npm_imports: final_imports,
-    };
-
-    Ok(FinalizedOutput {
-        html: resolved_html,
-        has_errors: false,
-        errors: vec![],
-        manifest: Some(manifest),
-    })
-}
-
-#[cfg(feature = "napi")]
-#[napi]
-pub fn finalize_output_native(
-    ir_json: serde_json::Value,
-    compiled_json: serde_json::Value,
-) -> napi::Result<FinalizedOutput> {
-    let ir: ZenIR = serde_json::from_value(ir_json)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid IR: {}", e)))?;
-
-    let compiled: CompiledTemplate = serde_json::from_value(compiled_json)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid CompiledTemplate: {}", e)))?;
-
-    // PHASE 3: Resolve HEAD_EXPR markers to static values
-    // Populate props from ir.all_states so static resolution has access to state values
-    let head_props: std::collections::HashMap<String, String> = ir.all_states.clone();
-    let mut resolved_html = compiled.html.clone();
-
-    // PHASE 3.5: Inject Head component content into HTML <head>
-    if let Some(ref head_directive) = ir.head_directive {
-        resolved_html = inject_head_elements(&resolved_html, head_directive, &head_props);
-    }
-
-    // Verify HTML (after HEAD_EXPR resolution)
-    let html_errors = verify_no_raw_expressions(&resolved_html, &ir.file_path);
-    if !html_errors.is_empty() {
-        return Ok(FinalizedOutput {
-            has_errors: true,
-            errors: html_errors,
-            html: String::new(),
-            manifest: None,
-        });
-    }
-
-    // Prepare Codegen Input
-    let script_content = ir
-        .script
-        .as_ref()
-        .map(|s| s.raw.clone())
-        .unwrap_or_default();
-
-    // Map expressions
-    let expressions: Vec<ExpressionInput> = ir
-        .template
-        .expressions
-        .iter()
-        .map(|e| ExpressionInput {
-            id: e.id.clone(),
-            code: e.code.clone(),
-            loop_context: e.loop_context.as_ref().map(|lc| LoopContextInput {
-                variables: lc.variables.clone(),
-                map_source: lc.map_source.clone(),
-            }),
-        })
-        .collect();
-
-    let codegen_input = CodegenInput {
-        file_path: ir.file_path.clone(),
-        script_content,
-        expressions,
-        styles: ir.styles,
-        template_bindings: vec![],
-        location: ir.file_path.clone(),
-        nodes: ir.template.nodes,
-        page_bindings: ir.page_bindings.clone(),
-        page_props: ir.page_props.clone(),
-        all_states: ir.all_states.clone(),
-        locals: vec![],
-    };
-
-    let runtime_code = generate_runtime_code_internal(codegen_input);
-
     let final_imports = emit_imports(&runtime_code.npm_imports);
 
     // Generate manifest for bundler

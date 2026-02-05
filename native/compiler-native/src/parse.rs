@@ -10,6 +10,8 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 use regex::Regex;
+
+#[cfg(feature = "napi")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -823,6 +825,18 @@ pub fn parse_script(html: &str) -> Option<ScriptIR> {
                     attributes.insert("setup".to_string(), "true".to_string());
                 }
 
+                // Extract lang attribute
+                if let Some(lang_idx) = tag_content.find("lang=") {
+                    let rest = &tag_content[lang_idx + 5..];
+                    let quote_char = rest.chars().next().unwrap_or('"');
+                    if quote_char == '"' || quote_char == '\'' {
+                        if let Some(end_idx) = rest[1..].find(quote_char) {
+                            let lang_val = &rest[1..end_idx + 1]; // +1 because we search from index 1
+                            attributes.insert("lang".to_string(), lang_val.to_string());
+                        }
+                    }
+                }
+
                 let content = &html[absolute_open_end + 1..absolute_close_start];
                 if !content.trim().is_empty() {
                     scripts.push(content.trim().to_string());
@@ -879,25 +893,6 @@ pub fn parse_script(html: &str) -> Option<ScriptIR> {
 // ═══════════════════════════════════════════════════════════════════════════════
 // NAPI EXPORTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
-#[cfg(feature = "napi")]
-#[napi]
-pub fn parse_template_native(html: String, file_path: String) -> napi::Result<serde_json::Value> {
-    let ir = parse_template(&html, &file_path).map_err(|e| napi::Error::from_reason(e.message))?;
-    serde_json::to_value(ir).map_err(|e| napi::Error::from_reason(e.to_string()))
-}
-
-#[cfg(feature = "napi")]
-#[napi]
-pub fn parse_script_native(html: String) -> Option<serde_json::Value> {
-    parse_script(&html).and_then(|ir| serde_json::to_value(ir).ok())
-}
-
-#[cfg(feature = "napi")]
-#[napi]
-pub fn is_component_tag_native(tag_name: String) -> bool {
-    is_component_tag(&tag_name)
-}
 
 /// Extract the raw script block content from a .zen file
 /// Used by document compilation to get script for compile-time execution
@@ -1079,7 +1074,7 @@ pub fn parse_full_zen_native(
         // We look for a component in components_map that has <html> as its root.
         let mut script_source = extract_script_block(&source).unwrap_or_default();
 
-        for (name, comp_val) in &components_map {
+        for (_name, comp_val) in &components_map {
             if let Ok(comp) =
                 serde_json::from_value::<crate::component::ComponentIR>(comp_val.clone())
             {
@@ -1095,7 +1090,7 @@ pub fn parse_full_zen_native(
         // Execute document script at compile time
         match crate::document::execute_document_script(&script_source, &props_map) {
             Ok(scope) => Some(scope),
-            Err(e) => {
+            Err(_e) => {
                 // Don't fail hard - fall back to no scope (will show compile error in output)
                 None
             }
@@ -1120,7 +1115,7 @@ pub fn parse_full_zen_native(
         .map_err(|e| napi::Error::from_reason(e))?;
 
     // Step 7: Build result with all fields
-    let mut result = serde_json::json!({
+    let result = serde_json::json!({
         "ir": zen_ir,
         "html": finalized.html,
         "hasErrors": finalized.has_errors,
@@ -1234,7 +1229,7 @@ pub fn compile_zen_internal(
         }
 
         let mut script_source = extract_script_block(source).unwrap_or_default();
-        for (name, comp_val) in &options.components {
+        for (_name, comp_val) in &options.components {
             if let Ok(comp) =
                 serde_json::from_value::<crate::component::ComponentIR>(comp_val.clone())
             {

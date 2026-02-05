@@ -3,11 +3,11 @@ use crate::validate::{ExpressionIR, LoopContext, TemplateNode, ZenIR};
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, PropertyKey, Statement};
+use oxc_ast::ast::Statement;
 use oxc_ast_visit::VisitMut;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -75,7 +75,6 @@ struct ResolutionContext {
     all_states: HashMap<String, String>,
     all_props: HashSet<String>,
     collected_imports: HashSet<String>,
-    file_path: String,
     collected_errors: Vec<String>,
     /// Head directive collected from Head component during resolution
     head_directive: Option<crate::validate::HeadDirective>,
@@ -94,7 +93,6 @@ pub fn resolve_components(
 
     let mut ctx = ResolutionContext {
         components,
-        file_path: ir.file_path.clone(),
         ..Default::default()
     };
 
@@ -165,58 +163,6 @@ pub fn resolve_components(
     }
 
     Ok(ir)
-}
-
-#[cfg(feature = "napi")]
-#[napi]
-pub fn resolve_components_native(ir_json: String, components_json: String) -> String {
-    let mut ir: ZenIR = serde_json::from_str(&ir_json).expect("Failed to parse IR");
-    let components_map: HashMap<String, ComponentIR> =
-        serde_json::from_str(&components_json).expect("Failed to parse components");
-
-    let mut ctx = ResolutionContext {
-        components: components_map,
-        file_path: ir.file_path.clone(),
-        ..Default::default()
-    };
-
-    // Accumulate existing script
-    if let Some(script) = &ir.script {
-        ctx.merged_script = script.raw.clone();
-    }
-
-    // Resolve nodes
-    let resolved_nodes = resolve_nodes(ir.template.nodes, &mut ctx, 0);
-
-    ir.template.nodes = resolved_nodes;
-
-    // Append collected expressions
-    ir.template.expressions.extend(ctx.collected_expressions);
-
-    // Collect styles from components
-    let mut component_styles = Vec::new();
-    for name in &ctx.used_components {
-        if let Some(comp) = ctx.components.get(name) {
-            for style in &comp.styles {
-                component_styles.push(crate::validate::StyleIR { raw: style.clone() });
-            }
-        }
-    }
-    ir.styles.extend(component_styles);
-
-    // Update script - handle pages with no script initial tag
-    if let Some(script) = &mut ir.script {
-        script.raw = ctx.merged_script;
-    } else if !ctx.merged_script.is_empty() {
-        ir.script = Some(crate::validate::ScriptIR {
-            raw: ctx.merged_script,
-            attributes: HashMap::new(),
-            states: HashMap::new(),
-            props: Vec::new(),
-        });
-    }
-
-    serde_json::to_string(&ir).expect("Failed to serialize IR")
 }
 
 fn resolve_nodes(
@@ -661,7 +607,7 @@ fn rebind_node_to_scope(node: TemplateNode, loop_context: &Option<LoopContext>) 
     if loop_context.is_none() {
         return node;
     }
-    let lc = loop_context.as_ref().unwrap();
+    let _lc = loop_context.as_ref().unwrap();
 
     match node {
         TemplateNode::Element(mut elem) => {
@@ -841,7 +787,7 @@ pub fn rename_symbols_safe(
 
     // Preprocess: Replace "state " and "prop " with "let " so Oxc can parse Zenith's custom keywords
     let parsable_code = code.replace("state ", "let ").replace("prop ", "let ");
-    let used_preprocessing = parsable_code != code;
+    let _used_preprocessing = parsable_code != code;
 
     let allocator = Allocator::default();
     let source_type = SourceType::default()
@@ -942,280 +888,10 @@ fn collect_binding_pattern(pattern: &oxc_ast::ast::BindingPattern, symbols: &mut
     }
 }
 
-fn collect_replacements_stmt(
-    stmt: &Statement,
-    map: &HashMap<String, String>,
-    replacements: &mut Vec<(u32, u32, String)>,
-) {
-    match stmt {
-        Statement::VariableDeclaration(var) => {
-            for decl in &var.declarations {
-                collect_replacements_binding(&decl.id, map, replacements);
-                if let Some(init) = &decl.init {
-                    collect_replacements_expr(init, map, replacements);
-                }
-            }
-        }
-        Statement::FunctionDeclaration(func) => {
-            if let Some(id) = &func.id {
-                if let Some(new_name) = map.get(&id.name.to_string()) {
-                    replacements.push((id.span.start, id.span.end, new_name.clone()));
-                }
-            }
-            if let Some(body) = &func.body {
-                for s in &body.statements {
-                    collect_replacements_stmt(s, map, replacements);
-                }
-            }
-            for param in &func.params.items {
-                collect_replacements_binding(&param.pattern, map, replacements);
-            }
-        }
-        Statement::ClassDeclaration(cls) => {
-            if let Some(id) = &cls.id {
-                if let Some(new_name) = map.get(&id.name.to_string()) {
-                    replacements.push((id.span.start, id.span.end, new_name.clone()));
-                }
-            }
-        }
-        Statement::ExpressionStatement(expr_stmt) => {
-            collect_replacements_expr(&expr_stmt.expression, map, replacements);
-        }
-        Statement::BlockStatement(blk) => {
-            for s in &blk.body {
-                collect_replacements_stmt(s, map, replacements);
-            }
-        }
-        Statement::IfStatement(if_stmt) => {
-            collect_replacements_expr(&if_stmt.test, map, replacements);
-            collect_replacements_stmt(&if_stmt.consequent, map, replacements);
-            if let Some(alt) = &if_stmt.alternate {
-                collect_replacements_stmt(alt, map, replacements);
-            }
-        }
-        Statement::ReturnStatement(ret) => {
-            if let Some(arg) = &ret.argument {
-                collect_replacements_expr(arg, map, replacements);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_replacements_expr(
-    expr: &Expression,
-    map: &HashMap<String, String>,
-    replacements: &mut Vec<(u32, u32, String)>,
-) {
-    match expr {
-        Expression::Identifier(id) => {
-            if let Some(new_name) = map.get(&id.name.to_string()) {
-                replacements.push((id.span.start, id.span.end, new_name.clone()));
-            }
-        }
-        Expression::BinaryExpression(bin) => {
-            collect_replacements_expr(&bin.left, map, replacements);
-            collect_replacements_expr(&bin.right, map, replacements);
-        }
-        // UpdateExpression: count++, --count, etc.
-        Expression::UpdateExpression(update) => {
-            // argument is SimpleAssignmentTarget, not Expression
-            match &update.argument {
-                oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                    if let Some(new_name) = map.get(&id.name.to_string()) {
-                        replacements.push((id.span.start, id.span.end, new_name.clone()));
-                    }
-                }
-                oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(st) => {
-                    collect_replacements_expr(&st.object, map, replacements);
-                }
-                oxc_ast::ast::SimpleAssignmentTarget::ComputedMemberExpression(comp) => {
-                    collect_replacements_expr(&comp.object, map, replacements);
-                    collect_replacements_expr(&comp.expression, map, replacements);
-                }
-                _ => {}
-            }
-        }
-        // AssignmentExpression: count = 5, count += 1, etc.
-        Expression::AssignmentExpression(assign) => {
-            // Left side can be SimpleAssignmentTarget (Identifier) or AssignmentTargetPattern
-            match &assign.left {
-                oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(id) => {
-                    if let Some(new_name) = map.get(&id.name.to_string()) {
-                        replacements.push((id.span.start, id.span.end, new_name.clone()));
-                    }
-                }
-                oxc_ast::ast::AssignmentTarget::StaticMemberExpression(st) => {
-                    collect_replacements_expr(&st.object, map, replacements);
-                }
-                oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(comp) => {
-                    collect_replacements_expr(&comp.object, map, replacements);
-                    collect_replacements_expr(&comp.expression, map, replacements);
-                }
-                _ => {}
-            }
-            collect_replacements_expr(&assign.right, map, replacements);
-        }
-        // UnaryExpression: !flag, -num, typeof x, etc.
-        Expression::UnaryExpression(unary) => {
-            collect_replacements_expr(&unary.argument, map, replacements);
-        }
-        // LogicalExpression: a && b, a || b, a ?? b
-        Expression::LogicalExpression(logical) => {
-            collect_replacements_expr(&logical.left, map, replacements);
-            collect_replacements_expr(&logical.right, map, replacements);
-        }
-        // ConditionalExpression: a ? b : c
-        Expression::ConditionalExpression(cond) => {
-            collect_replacements_expr(&cond.test, map, replacements);
-            collect_replacements_expr(&cond.consequent, map, replacements);
-            collect_replacements_expr(&cond.alternate, map, replacements);
-        }
-        // ParenthesizedExpression: (expr)
-        Expression::ParenthesizedExpression(paren) => {
-            collect_replacements_expr(&paren.expression, map, replacements);
-        }
-        // SequenceExpression: a, b, c
-        Expression::SequenceExpression(seq) => {
-            for e in &seq.expressions {
-                collect_replacements_expr(e, map, replacements);
-            }
-        }
-        // TemplateLiteral: `hello ${name}`
-        Expression::TemplateLiteral(tpl) => {
-            for expr in &tpl.expressions {
-                collect_replacements_expr(expr, map, replacements);
-            }
-        }
-        // AwaitExpression: await promise
-        Expression::AwaitExpression(await_expr) => {
-            collect_replacements_expr(&await_expr.argument, map, replacements);
-        }
-        // YieldExpression: yield value
-        Expression::YieldExpression(yield_expr) => {
-            if let Some(arg) = &yield_expr.argument {
-                collect_replacements_expr(arg, map, replacements);
-            }
-        }
-        Expression::CallExpression(call) => {
-            collect_replacements_expr(&call.callee, map, replacements);
-            for arg in &call.arguments {
-                if let Some(e) = arg.as_expression() {
-                    collect_replacements_expr(e, map, replacements);
-                }
-            }
-        }
-        Expression::ComputedMemberExpression(comp) => {
-            collect_replacements_expr(&comp.object, map, replacements);
-            collect_replacements_expr(&comp.expression, map, replacements);
-        }
-        Expression::StaticMemberExpression(st) => {
-            if let Expression::Identifier(obj_id) = &st.object {
-                if obj_id.name == "props" {
-                    let prop_name = st.property.name.to_string();
-                    let full_name = format!("props.{}", prop_name);
-                    if let Some(new_name) = map.get(&full_name) {
-                        replacements.push((st.span.start, st.span.end, new_name.clone()));
-                        return;
-                    }
-                }
-            }
-            collect_replacements_expr(&st.object, map, replacements);
-        }
-        Expression::PrivateFieldExpression(p) => {
-            collect_replacements_expr(&p.object, map, replacements);
-        }
-        Expression::ObjectExpression(obj) => {
-            for prop in &obj.properties {
-                match prop {
-                    oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
-                        if p.shorthand {
-                            if let PropertyKey::StaticIdentifier(id) = &p.key {
-                                if let Some(new_name) = map.get(&id.name.to_string()) {
-                                    let replacement = format!("{}: {}", id.name, new_name);
-                                    replacements.push((p.span.start, p.span.end, replacement));
-                                }
-                            }
-                        } else {
-                            collect_replacements_expr(&p.value, map, replacements);
-                            if p.computed {
-                                if let Some(e) = p.key.as_expression() {
-                                    collect_replacements_expr(e, map, replacements);
-                                }
-                            }
-                        }
-                    }
-                    oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
-                        collect_replacements_expr(&s.argument, map, replacements);
-                    }
-                }
-            }
-        }
-        Expression::ArrayExpression(arr) => {
-            for elem in &arr.elements {
-                if let Some(e) = elem.as_expression() {
-                    collect_replacements_expr(e, map, replacements);
-                }
-            }
-        }
-        Expression::ArrowFunctionExpression(func) => {
-            for param in &func.params.items {
-                collect_replacements_binding(&param.pattern, map, replacements);
-            }
-            for s in &func.body.statements {
-                collect_replacements_stmt(s, map, replacements);
-            }
-        }
-        Expression::NewExpression(new_expr) => {
-            collect_replacements_expr(&new_expr.callee, map, replacements);
-            for arg in &new_expr.arguments {
-                if let Some(e) = arg.as_expression() {
-                    collect_replacements_expr(e, map, replacements);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_replacements_binding(
-    pattern: &oxc_ast::ast::BindingPattern,
-    map: &HashMap<String, String>,
-    replacements: &mut Vec<(u32, u32, String)>,
-) {
-    match pattern {
-        oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
-            if let Some(new_name) = map.get(&id.name.to_string()) {
-                replacements.push((id.span.start, id.span.end, new_name.clone()));
-            }
-        }
-        oxc_ast::ast::BindingPattern::ObjectPattern(obj) => {
-            for prop in &obj.properties {
-                collect_replacements_binding(&prop.value, map, replacements);
-            }
-            if let Some(rest) = &obj.rest {
-                collect_replacements_binding(&rest.argument, map, replacements);
-            }
-        }
-        oxc_ast::ast::BindingPattern::ArrayPattern(arr) => {
-            for elem in &arr.elements {
-                if let Some(pattern) = elem {
-                    collect_replacements_binding(pattern, map, replacements);
-                }
-            }
-            if let Some(rest) = &arr.rest {
-                collect_replacements_binding(&rest.argument, map, replacements);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validate::{ElementNode, ExpressionIR, SourceLocation, TemplateNode};
-    use std::collections::HashMap;
+    use crate::validate::{ElementNode, SourceLocation, TemplateNode};
 
     fn mock_loc() -> SourceLocation {
         SourceLocation { line: 1, column: 1 }

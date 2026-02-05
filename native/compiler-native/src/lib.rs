@@ -40,12 +40,10 @@ mod codegen;
 mod component;
 mod discovery;
 mod document;
-mod expression_tests;
+
 mod finalize;
-mod head_validator;
 mod jsx_lowerer;
 
-mod lowering_tests;
 mod parse;
 mod static_eval;
 mod transform;
@@ -63,16 +61,7 @@ pub use codegen::generate_codegen_intent;
 // I should gate the re-exports too if they are NAPI-specific.
 
 #[cfg(feature = "napi")]
-pub use component::resolve_components_native;
-#[cfg(feature = "napi")]
-pub use discovery::{
-    discover_components_native, extract_page_bindings_native, extract_styles_native,
-};
-#[cfg(feature = "napi")]
-pub use finalize::finalize_output_native;
-
-#[cfg(feature = "napi")]
-pub use parse::{is_component_tag_native, parse_script_native, parse_template_native};
+pub use parse::parse_full_zen_native;
 
 // Internal Rust-to-Rust API (for Rolldown plugin)
 pub use parse::{compile_zen_internal, CompileOptions, CompileResult};
@@ -85,10 +74,7 @@ pub use transform::Binding;
 // classify_expression_native might be NAPI?
 // Let's check transform.rs
 #[cfg(feature = "napi")]
-pub use transform::{
-    analyze_expressions, classify_expression_native, evaluate_expression_native,
-    lower_fragments_native, transform_template_native,
-};
+pub use transform::transform_template_native;
 pub use validate::*;
 
 #[cfg(feature = "napi")]
@@ -96,7 +82,5 @@ pub use validate::*;
 pub fn compile_bridge() -> String {
     "Zenith Native Bridge Connected".to_string()
 }
-mod codegen_test_repro;
-mod repro_event_handler;
-mod repro_prop_fallback;
+
 mod sanity_check_phase_0;

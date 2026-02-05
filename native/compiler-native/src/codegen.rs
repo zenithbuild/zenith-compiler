@@ -9,7 +9,7 @@ use crate::validate::{AttributeValue, ElementNode, ExpressionInput, StyleIR, Tem
 use napi_derive::napi;
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::{ast::*, AstBuilder};
-use oxc_ast_visit::{walk_mut, VisitMut};
+use oxc_ast_visit::VisitMut;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, SPAN};
@@ -79,22 +79,6 @@ pub struct ScriptImport {
 
 #[cfg(feature = "napi")]
 #[napi]
-pub fn generate_runtime_code(input_json: String) -> napi::Result<RuntimeCode> {
-    let input: CodegenInput = serde_json::from_str(&input_json)
-        .map_err(|e| napi::Error::from_reason(format!("Failed to parse input: {}", e)))?;
-
-    let result = generate_runtime_code_internal(input);
-    if !result.errors.is_empty() {
-        return Err(napi::Error::from_reason(format!(
-            "Zenith Compilation Failed:\n{}",
-            result.errors.join("\n")
-        )));
-    }
-    Ok(result)
-}
-
-#[cfg(feature = "napi")]
-#[napi]
 pub fn generate_codegen_intent() -> String {
     "Rust Codegen Authority".to_string()
 }
@@ -117,9 +101,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     // 2. Extract state and prop bindings using Regex
     let mut state_bindings = HashSet::new();
     let mut prop_bindings = HashSet::new();
-
-    let state_decl_re = Regex::new(r"(?m)^\s*state\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
-    let prop_decl_re = Regex::new(r"(?m)^\s*prop\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
 
     // Merge page-level bindings
     if !input.page_bindings.is_empty() {
@@ -236,7 +217,7 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
     }
 
     for stmt in program.body.into_iter() {
-        if let Statement::ImportDeclaration(mut import_decl) = stmt {
+        if let Statement::ImportDeclaration(import_decl) = stmt {
             let source = import_decl.source.value.to_string();
             if source.ends_with(".zen") {
                 // Zenith architectural decision: Components are compile-time structural declarations.
@@ -568,7 +549,6 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for d in &state_decls {}
     let state_props: Vec<String> = state_decls
         .iter()
         .map(|d| format!("  {}: {}", d.name, d.initial_value))

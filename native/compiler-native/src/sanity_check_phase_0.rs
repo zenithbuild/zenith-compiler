@@ -1,9 +1,8 @@
-use crate::codegen::{generate_runtime_code_internal, CodegenInput};
-use crate::validate::ExpressionInput;
-use std::collections::HashMap;
-
 #[test]
 fn phase_0_hard_stop_sanity_check() {
+    use crate::codegen::{generate_runtime_code_internal, CodegenInput};
+    use crate::validate::ExpressionInput;
+
     // This test strictly enforces Phase 0 of the Lock-In Protocol:
     // "Inspect the generated JS for the failing page... NONE of the following strings appear: count++, parentCount, count), => count"
 
@@ -127,11 +126,6 @@ fn phase_0_hard_stop_sanity_check() {
 
     // 6. Verify strictness on "getThemePreference" type issues (local variable regression check)
     // We'll add a local variable case to ensure it doesn't get rewritten
-    let script_local_check = r#"
-        function setup() {
-             let localVal = 100;
-             console.log(localVal);
-        }
-    "#;
+
     // (We would need a separate run or add to above script. Let's stick to the main Phase 0 requirements first).
 }

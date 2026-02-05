@@ -34,13 +34,6 @@ pub struct DocumentScope {
 }
 
 impl DocumentScope {
-    pub fn new() -> Self {
-        Self {
-            props: HashMap::new(),
-            locals: HashMap::new(),
-        }
-    }
-
     pub fn with_props(props: HashMap<String, String>) -> Self {
         Self {
             props,
@@ -70,12 +63,6 @@ pub enum DocumentCompileError {
         construct: String,
         line: Option<usize>,
     },
-    InvalidDocumentStructure {
-        reason: String,
-    },
-    ScriptExecutionError {
-        message: String,
-    },
 }
 
 impl std::fmt::Display for DocumentCompileError {
@@ -91,12 +78,6 @@ impl std::fmt::Display for DocumentCompileError {
                     write!(f, "Forbidden construct '{}' in document script", construct)
                 }
             }
-            Self::InvalidDocumentStructure { reason } => {
-                write!(f, "Invalid document structure: {}", reason)
-            }
-            Self::ScriptExecutionError { message } => {
-                write!(f, "Script execution error: {}", message)
-            }
         }
     }
 }
@@ -105,7 +86,7 @@ impl std::fmt::Display for DocumentCompileError {
 /// A Document Module has `<html>` as its root node
 pub fn is_document_module(nodes: &[TemplateNode]) -> bool {
     // Check if first element is <html>
-    for (i, node) in nodes.iter().enumerate() {
+    for node in nodes.iter() {
         match node {
             TemplateNode::Element(elem) => {
                 return elem.tag.eq_ignore_ascii_case("html");
@@ -527,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_scope_resolution() {
-        let mut scope = DocumentScope::new();
+        let mut scope = DocumentScope::default();
         scope.props.insert("title".to_string(), "Home".to_string());
         scope
             .locals
@@ -539,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_template_literal_resolution() {
-        let mut scope = DocumentScope::new();
+        let mut scope = DocumentScope::default();
         scope.props.insert("title".to_string(), "Home".to_string());
 
         let result = resolve_template_literal("`Zenith | ${props.title}`", &scope);
