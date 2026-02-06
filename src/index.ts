@@ -77,6 +77,7 @@ export async function compile(
   };
 }
 
+export * from './core'
 export { parseZenFile }
 export type { FinalizedOutput, CompiledTemplate }
 export type { BundlePlan, ExpressionIR, ZenIR, TemplateNode } from './ir/types'
