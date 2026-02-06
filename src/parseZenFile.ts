@@ -58,14 +58,6 @@ export function parseZenFile(filePath: string, sourceInput?: string, options: Pa
         };
 
         const result = native.parseFullZenNative(source, filePath, JSON.stringify(nativeOptions));
-
-        // The result might be a ZenIR (metadata) or FinalizedOutput (full)
-        // or a CompilerError object if the native side returned one.
-        if (result && result.code && result.errorType) {
-            // Re-throw as proper TypeScript error if needed, but native result is usually enough
-            return result;
-        }
-
         return result;
     } catch (error: any) {
         // Native panic or unhandled error

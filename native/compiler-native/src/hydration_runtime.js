@@ -440,8 +440,8 @@
                         if (v && typeof v === 'object' && v.fn) fn = v.fn;
                         if (typeof fn === 'function') {
                             el.addEventListener(k.slice(2).toLowerCase(), (e) => {
-                                // Event handlers are called with appropriate context
-                                const h = fn(e, el); if (typeof h === 'function') h(e, el);
+                                // Event handlers are called with appropriate context (this = element)
+                                const h = fn.call(el, e, el); if (typeof h === 'function') h.call(el, e, el);
                             });
                         }
                     } else {

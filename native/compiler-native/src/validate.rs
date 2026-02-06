@@ -100,6 +100,7 @@ fn get_guarantee(code: &str) -> &'static str {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "napi", napi(object))]
+#[serde(rename_all = "camelCase")]
 pub struct CompilerError {
     pub code: String,
     pub error_type: String,

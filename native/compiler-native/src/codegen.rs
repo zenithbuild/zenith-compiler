@@ -555,32 +555,35 @@ pub fn generate_runtime_code_internal(input: CodegenInput) -> RuntimeCode {
         .collect();
 
     let reactive_state_init = format!(
-        "const state = __ZENITH_RUNTIME__.zenState({{\n{}\n}});\n  const __defaultState = state;\n  const props = {{}};\n  const locals = {{}};\n  const scope = {{ state, props, locals }};",
+        "const state = zenState({{\n{}\n}});\n  const __defaultState = state;\n  const props = {{}};\n  const locals = {{}};\n  const scope = {{ state, props, locals }};",
         state_props.join(",\n")
     );
 
-    // 10. Hydration Runtime (embedded)
-    let hydration = include_str!("hydration_runtime.js");
+    // 10. Hydration Runtime (External Import)
+    // We no longer embed the runtime string. We generate an ESM import with named aliases.
+    let hydration = r#"import {
+  signal as zenSignal,
+  state as zenState,
+  effect as zenEffect,
+  memo as zenMemo,
+  ref as zenRef,
+  onMount as zenOnMount,
+  onUnmount as zenOnUnmount,
+  batch as zenBatch,
+  untrack as zenUntrack
+} from "@zenithbuild/runtime";"#;
 
     // 11. Bundle construction
     let bundle_code = format!(
         r#"
 {}
 // [ZENITH-NATIVE] Rust Compiler Authority Bundle
+{}
 
-if (typeof window !== 'undefined') {{
-  // 1. Zenith Runtime
-  {}
-
-  // 2. Runtime Accessors & Aliases
-  const {{ 
-    zenSignal, zenState, zenEffect, zenMemo, zenRef, zenOnMount, zenOnUnmount, zenBatch, zenUntrack 
-  }} = window.__ZENITH_RUNTIME__;
-  const __zenith = window.__zenith;
   if (!window.__ZENITH_SCOPES__) window.__ZENITH_SCOPES__ = {{}};
   
   // Zenith standard aliases
-  const ref = zenSignal;
+  const ref = zenRef;
   const reactive = zenState;
   const effect = zenEffect;
   const memo = zenMemo;
@@ -861,33 +864,45 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
                 "data-zen-click" => {
                     if let AttributeValue::Static(fn_name) = &attr.value {
                         // Convert to onclick function prop
-                        ("onclick".to_string(), format!("() => {}()", fn_name))
+                        (
+                            "onclick".to_string(),
+                            format!("function(event, target) {{ {}() }}", fn_name),
+                        )
                     } else {
-                        return Some(format!("\"onclick\": () => {{}}"));
+                        return Some(format!("\"onclick\": function(event, target) {{}}"));
                     }
                 }
                 "data-zen-change" => {
                     if let AttributeValue::Static(fn_name) = &attr.value {
-                        ("onchange".to_string(), format!("(e) => {}(e)", fn_name))
+                        (
+                            "onchange".to_string(),
+                            format!("function(event, target) {{ {}(event) }}", fn_name),
+                        )
                     } else {
-                        return Some(format!("\"onchange\": (e) => {{}}"));
+                        return Some(format!("\"onchange\": function(event, target) {{}}"));
                     }
                 }
                 "data-zen-input" => {
                     if let AttributeValue::Static(fn_name) = &attr.value {
-                        ("oninput".to_string(), format!("(e) => {}(e)", fn_name))
+                        (
+                            "oninput".to_string(),
+                            format!("function(event, target) {{ {}(event) }}", fn_name),
+                        )
                     } else {
-                        return Some(format!("\"oninput\": (e) => {{}}"));
+                        return Some(format!("\"oninput\": function(event, target) {{}}"));
                     }
                 }
                 "data-zen-submit" => {
                     if let AttributeValue::Static(fn_name) = &attr.value {
                         (
                             "onsubmit".to_string(),
-                            format!("(e) => {{ e.preventDefault(); {}(e); }}", fn_name),
+                            format!(
+                                "function(event, target) {{ event.preventDefault(); {}(event); }}",
+                                fn_name
+                            ),
                         )
                     } else {
-                        return Some(format!("\"onsubmit\": (e) => {{}}"));
+                        return Some(format!("\"onsubmit\": function(event, target) {{}}"));
                     }
                 }
                 _ => {
@@ -908,9 +923,9 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
                                     .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
                                     && !s.is_empty();
                                 if is_simple_id {
-                                    format!("() => {}()", s)
+                                    format!("function(event, target) {{ {}() }}", s)
                                 } else {
-                                    format!("() => {{ {} }}", s)
+                                    format!("function(event, target) {{ {} }}", s)
                                 }
                             } else {
                                 format!("\"{}\"", escape_js_string(s))
@@ -919,7 +934,10 @@ fn generate_element_ir(el: &ElementNode, expressions: &[ExpressionInput]) -> Str
                         AttributeValue::Dynamic(expr) => {
                             if p_name.starts_with("on") {
                                 // Event Handler: Return function directly
-                                format!("() => (_expr_{}({}))", expr.id, args)
+                                format!(
+                                    "function(event, target) {{ return _expr_{}({}); }}",
+                                    expr.id, args
+                                )
                             } else {
                                 // Reactive Attribute: Return wrapper
                                 format!(

@@ -424,9 +424,9 @@ fn parse_dom_node(
     normalized_exprs: &HashMap<String, String>,
     inline_scripts: &HashMap<String, String>,
     parent_loop_context: Option<&LoopContext>,
-    _file_path: &str,
+    file_path: &str,
     is_in_head: bool,
-) -> Vec<TemplateNode> {
+) -> Result<Vec<TemplateNode>, CompilerError> {
     let node = handle;
 
     match &node.data {
@@ -441,36 +441,36 @@ fn parse_dom_node(
                     normalized_exprs,
                     inline_scripts,
                     parent_loop_context,
-                    _file_path,
+                    file_path,
                     is_in_head,
-                ));
+                )?);
             }
-            nodes
+            Ok(nodes)
         }
 
         NodeData::Doctype {
             name,
             public_id,
             system_id,
-        } => vec![TemplateNode::Doctype(DoctypeNode {
+        } => Ok(vec![TemplateNode::Doctype(DoctypeNode {
             name: name.to_string(),
             public_id: public_id.to_string(),
             system_id: system_id.to_string(),
             location: SourceLocation { line: 1, column: 1 },
-        })],
+        })]),
 
         NodeData::Text { contents } => {
             let text = contents.borrow().to_string();
 
             // Process text that may contain multiple expressions.
             // process_text_with_expressions handles plain text, single expressions, and mixed content.
-            process_text_with_expressions(
+            Ok(process_text_with_expressions(
                 &text,
                 expressions,
                 normalized_exprs,
                 parent_loop_context,
                 is_in_head,
-            )
+            ))
         }
 
         NodeData::Element { name, attrs, .. } => {
@@ -485,6 +485,18 @@ fn parse_dom_node(
                 }
             }
 
+            // INVARIANT: Rejects <template> tag (INV005)
+            if tag_name.to_lowercase() == "template" {
+                return Err(CompilerError::with_details(
+                    "INV005",
+                    "The <template> tag is not supported in Zenith. Use structural fragments or components instead.",
+                    file_path,
+                    1,
+                    1,
+                    Some("<template>".to_string()),
+                    vec![],
+                ));
+            }
             // INLINE SCRIPT RESTORATION
             let mut script_content = None;
             if tag_name.to_lowercase() == "script" {
@@ -548,22 +560,22 @@ fn parse_dom_node(
                     normalized_exprs,
                     inline_scripts,
                     parent_loop_context,
-                    _file_path,
+                    file_path,
                     child_is_in_head,
-                ));
+                )?);
             }
 
             // Check if this is a component (uppercase first letter)
             if is_component_tag(&tag_name) {
-                vec![TemplateNode::Component(ComponentNode {
+                Ok(vec![TemplateNode::Component(ComponentNode {
                     name: tag_name,
                     attributes: parsed_attrs,
                     children,
                     location: SourceLocation { line: 1, column: 1 },
                     loop_context: parent_loop_context.cloned(),
-                })]
+                })])
             } else {
-                vec![TemplateNode::Element(ElementNode {
+                Ok(vec![TemplateNode::Element(ElementNode {
                     tag: tag_name,
                     attributes: parsed_attrs
                         .into_iter()
@@ -580,12 +592,12 @@ fn parse_dom_node(
                     },
                     location: SourceLocation { line: 1, column: 1 },
                     loop_context: parent_loop_context.cloned(),
-                })]
+                })])
             }
         }
 
-        NodeData::Comment { .. } => vec![],
-        NodeData::ProcessingInstruction { .. } => vec![],
+        NodeData::Comment { .. } => Ok(vec![]),
+        NodeData::ProcessingInstruction { .. } => Ok(vec![]),
     }
 }
 
@@ -669,6 +681,19 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
     // Step 4: Normalize expressions to placeholders
     let (normalized, normalized_exprs) = normalize_all_expressions(&casing_preserved);
 
+    // INVARIANT: Rejects <template> tag (INV005) - Pre-parse check for safety
+    if normalized.to_lowercase().contains("<template") {
+        return Err(CompilerError::with_details(
+            "INV005",
+            "The <template> tag is not supported in Zenith. Use structural fragments or components instead.",
+            file_path,
+            1,
+            1,
+            Some("<template>".to_string()),
+            vec![],
+        ));
+    }
+
     // Step 5: Parse with html5ever
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
@@ -701,7 +726,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
         inline_scripts: &HashMap<String, String>,
         file_path: &str,
         has_html_in_src: bool,
-    ) {
+    ) -> Result<(), CompilerError> {
         let node = handle;
         match &node.data {
             NodeData::Document => {
@@ -714,7 +739,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
                         inline_scripts,
                         file_path,
                         has_html_in_src,
-                    );
+                    )?;
                 }
             }
             NodeData::Element { name, .. } => {
@@ -734,7 +759,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
                             inline_scripts,
                             file_path,
                             has_html_in_src,
-                        );
+                        )?;
                     }
                 } else if tag == "html" && has_html_in_src {
                     // CRITICAL: When <html> is explicitly in source, we must preserve it
@@ -748,7 +773,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
                         None,
                         file_path,
                         false,
-                    ));
+                    )?);
                 } else {
                     nodes.extend(parse_dom_node(
                         handle,
@@ -758,7 +783,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
                         None,
                         file_path,
                         false,
-                    ));
+                    )?);
                 }
             }
             NodeData::Doctype { .. } => {
@@ -771,11 +796,24 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
                         None,
                         file_path,
                         false,
-                    ));
+                    )?);
                 }
             }
-            _ => {}
+            _ => {
+                // For other nodes (Text, Comment, ProcessingInstruction, etc.)
+                // we parse them directly if they are not filtered out by parse_dom_node
+                nodes.extend(parse_dom_node(
+                    handle,
+                    expressions,
+                    normalized_exprs,
+                    inline_scripts,
+                    None,
+                    file_path,
+                    false,
+                )?);
+            }
         }
+        Ok(())
     }
 
     collect_body_content(
@@ -786,7 +824,7 @@ pub fn parse_template(html: &str, file_path: &str) -> Result<TemplateIR, Compile
         &inline_scripts,
         file_path,
         has_html_in_src,
-    );
+    )?;
 
     Ok(TemplateIR {
         raw: html.to_string(),
@@ -972,9 +1010,23 @@ pub fn parse_full_zen_native(
 
     let mode = options.mode.unwrap_or_else(|| "full".to_string());
 
-    // Step 1: Parse template
-    let template_ir = parse_template(&source, &file_path)
-        .map_err(|e| napi::Error::from_reason(format!("Template parse error: {}", e.message)))?;
+    // Parse template
+    let template_ir = match parse_template(&source, &file_path) {
+        Ok(ir) => ir,
+        Err(e) => {
+            return Ok(serde_json::json!({
+                "code": e.code,
+                "errorType": e.error_type,
+                "message": e.message,
+                "guarantee": e.guarantee,
+                "file": e.file,
+                "line": e.line,
+                "column": e.column,
+                "context": e.context,
+                "hints": e.hints
+            }))
+        }
+    };
 
     // Step 2: Parse script
     let script_ir = parse_script(&source);

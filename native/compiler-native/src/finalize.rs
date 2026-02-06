@@ -9,10 +9,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::codegen::{generate_runtime_code_internal, CodegenInput, ScriptImport};
-use crate::validate::{
-    ComponentNode, ConditionalFragmentNode, ElementNode, ExpressionInput, LoopContext,
-    LoopContextInput, LoopFragmentNode, OptionalFragmentNode, TemplateNode, ZenIR,
-};
+use crate::validate::{ExpressionInput, LoopContextInput, TemplateNode, ZenIR};
 
 /// Inject head directive elements into HTML <head> section at compile time
 fn inject_head_elements(html: &str, head: &crate::validate::HeadDirective) -> String {
